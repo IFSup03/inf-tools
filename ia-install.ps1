@@ -3,7 +3,7 @@
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.3.0"
+$SCRIPT_VERSION = "2.5.0"
 $SCRIPT_DATA    = "09/04/2026"
 $CHANGELOG = @(
     [PSCustomObject]@{ Versao = "2.1.0"; Data = "09/04/2026"; Descricao = "Corrigido bug C:\Program1: /DIR do Git Bash agora usa aspas para caminhos com espacos" },
@@ -634,63 +634,261 @@ if ($modoPrincipal -eq '2') {
         $wingetOk = $false
         try { $null = & winget --version 2>&1; $wingetOk = $true } catch { }
 
+        # Garante npm no PATH para remocao CLI
+        $npmPaths = @("$env:ProgramFiles
+odejs", "$env:APPDATA
+pm")
+        foreach ($p in $npmPaths) {
+            if ((Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$p*")) {
+                $env:Path = "$p;$env:Path"
+            }
+        }
+
         if ($remClaudeCLI) {
             Write-Step "Removendo Claude Code (CLI)..."
+
+            # Metodo 1: winget
+            if ($wingetOk) {
+                try {
+                    $out = & winget uninstall --id Anthropic.ClaudeCode --silent --accept-source-agreements 2>&1 | Out-String
+                    Write-Host $out
+                } catch { }
+            }
+
+            # Metodo 2: npm uninstall
+            try { & npm uninstall -g @anthropic-ai/claude-code 2>&1 | ForEach-Object { Write-Host $_ } } catch { }
+
+            # Metodo 3: busca ampla por executavel claude em todos os locais conhecidos
+            $claudeLocais = @(
+                "$env:USERPROFILE\.local\bin\claude.exe",
+                "$env:USERPROFILE\.local\bin\claude",
+                "$env:USERPROFILE\.local\share\claude",
+                "$env:APPDATA\npm\claude.exe",
+                "$env:APPDATA\npm\claude",
+                "$env:APPDATA\npm\claude.cmd",
+                "$env:APPDATA\npm\claude.ps1",
+                "$env:APPDATA\npm\node_modules\@anthropic-ai\claude-code",
+                "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe",
+                "$env:LOCALAPPDATA\Microsoft\WinGet\Links\claude.exe",
+                "$env:ProgramFiles\Anthropic\Claude Code",
+                "$env:USERPROFILE\.claude\local"
+            )
+            foreach ($p in $claudeLocais) {
+                if (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) {
+                    Write-Ok "Encontrado em: $p"
+                    Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            # Busca dinamica: procura claude.exe em qualquer lugar no perfil do usuario
             try {
-                & npm uninstall -g @anthropic-ai/claude-code 2>&1 | ForEach-Object { Write-Host $_ }
-                Write-Ok "Claude Code removido."
-            } catch { Write-Warn "Falha ao remover Claude Code: $_" }
+                $encontrados = Get-ChildItem -Path $env:USERPROFILE -Filter "claude.exe" -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -notmatch "AnthropicClaude" } # Exclui Claude Desktop
+                foreach ($f in $encontrados) {
+                    Write-Ok "Encontrado em: $($f.FullName)"
+                    Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+
+            # Remove variaveis de ambiente relacionadas ao Claude Code
+            Write-Step "Removendo variaveis de ambiente do Claude Code..."
+            $claudeEnvVars = @(
+                "CLAUDE_CODE_GIT_BASH_PATH",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "CLAUDE_CODE_API_KEY_HELPER_TTL_MS",
+                "CLAUDE_CODE_SKIP_PERMISSIONS_CHECK"
+            )
+            foreach ($var in $claudeEnvVars) {
+                $val = [Environment]::GetEnvironmentVariable($var, "User")
+                if ($val) {
+                    [Environment]::SetEnvironmentVariable($var, $null, "User")
+                    Write-Ok "Variavel removida: $var"
+                }
+                $valM = [Environment]::GetEnvironmentVariable($var, "Machine")
+                if ($valM) {
+                    [Environment]::SetEnvironmentVariable($var, $null, "Machine")
+                    Write-Ok "Variavel de sistema removida: $var"
+                }
+            }
+
+            # Remove entradas do PATH que apontam para o Claude
+            Write-Step "Limpando PATH..."
+            $pathUser = [Environment]::GetEnvironmentVariable("Path", "User")
+            $pathEntradas = $pathUser -split ";"
+            $pathLimpo = ($pathEntradas | Where-Object {
+                $_ -notmatch "claude" -and
+                $_ -ne "$env:USERPROFILE\.local\bin" -or
+                (Test-Path -LiteralPath $_ -ErrorAction SilentlyContinue)
+            }) -join ";"
+            if ($pathLimpo -ne $pathUser) {
+                [Environment]::SetEnvironmentVariable("Path", $pathLimpo, "User")
+                Write-Ok "PATH atualizado."
+            }
+
+            # Verifica resultado
+            $claudeAinda = $false
+            try { $null = & claude --version 2>&1; $claudeAinda = $true } catch { }
+            if (-not $claudeAinda) {
+                Write-Ok "Claude Code removido com sucesso."
+            } else {
+                Write-Warn "Claude Code ainda detectado. Pode ser necessario reiniciar o terminal."
+            }
         }
 
         if ($remCodexCLI) {
             Write-Step "Removendo Codex CLI..."
-            try {
-                & npm uninstall -g @openai/codex 2>&1 | ForEach-Object { Write-Host $_ }
-                Write-Ok "Codex CLI removido."
-            } catch { Write-Warn "Falha ao remover Codex CLI: $_" }
+
+            try { & npm uninstall -g @openai/codex 2>&1 | ForEach-Object { Write-Host $_ } } catch { }
+
+            $codexLocais = @(
+                "$env:APPDATA\npm\codex.exe",
+                "$env:APPDATA\npm\codex",
+                "$env:APPDATA\npm\codex.cmd",
+                "$env:APPDATA\npm\codex.ps1",
+                "$env:APPDATA\npm\node_modules\@openai\codex",
+                "$env:LOCALAPPDATA\Microsoft\WinGet\Links\codex.exe"
+            )
+            foreach ($p in $codexLocais) {
+                if (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) {
+                    Write-Ok "Encontrado em: $p"
+                    Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            # Remove variaveis de ambiente do Codex
+            foreach ($var in @("OPENAI_API_KEY_PATH","CODEX_HOME")) {
+                if ([Environment]::GetEnvironmentVariable($var, "User")) {
+                    [Environment]::SetEnvironmentVariable($var, $null, "User")
+                    Write-Ok "Variavel removida: $var"
+                }
+            }
+
+            $codexAinda = $false
+            try { $null = & codex --version 2>&1; $codexAinda = $true } catch { }
+            if (-not $codexAinda) {
+                Write-Ok "Codex CLI removido com sucesso."
+            } else {
+                Write-Warn "Codex CLI ainda detectado. Pode ser necessario reiniciar o terminal."
+            }
         }
 
         if ($remOpenCode) {
             Write-Step "Removendo OpenCode..."
-            try {
-                & npm uninstall -g opencode-ai 2>&1 | ForEach-Object { Write-Host $_ }
-                Write-Ok "OpenCode removido."
-            } catch { Write-Warn "Falha ao remover OpenCode: $_" }
+
+            try { & npm uninstall -g opencode-ai 2>&1 | ForEach-Object { Write-Host $_ } } catch { }
+
+            $openLocais = @(
+                "$env:APPDATA\npm\opencode.exe",
+                "$env:APPDATA\npm\opencode",
+                "$env:APPDATA\npm\opencode.cmd",
+                "$env:APPDATA\npm\opencode.ps1",
+                "$env:APPDATA\npm\node_modules\opencode-ai",
+                "$env:LOCALAPPDATA\Microsoft\WinGet\Links\opencode.exe"
+            )
+            foreach ($p in $openLocais) {
+                if (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) {
+                    Write-Ok "Encontrado em: $p"
+                    Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            $openAinda = $false
+            try { $null = & opencode --version 2>&1; $openAinda = $true } catch { }
+            if (-not $openAinda) {
+                Write-Ok "OpenCode removido com sucesso."
+            } else {
+                Write-Warn "OpenCode ainda detectado. Pode ser necessario reiniciar o terminal."
+            }
         }
 
         if ($remClaudeDesk) {
             Write-Step "Removendo Claude Desktop..."
-            if ($wingetOk) {
+            $removido = $false
+
+            # Metodo 1: desinstalador nativo (Update.exe)
+            $updateExe = "$env:LOCALAPPDATA\AnthropicClaude\Update.exe"
+            if (Test-Path -LiteralPath $updateExe -ErrorAction SilentlyContinue) {
                 try {
-                    & winget uninstall --id Anthropic.Claude --silent 2>&1 | ForEach-Object { Write-Host $_ }
-                    Write-Ok "Claude Desktop removido."
-                } catch { Write-Warn "Falha via winget. Tente remover manualmente pelo Painel de Controle." }
+                    Start-Process $updateExe -ArgumentList "--uninstall" -Wait -NoNewWindow
+                    $removido = $true
+                } catch { }
+            }
+
+            # Metodo 2: winget
+            if (-not $removido -and $wingetOk) {
+                try {
+                    $out = & winget uninstall --id Anthropic.Claude --silent --accept-source-agreements 2>&1 | Out-String
+                    Write-Host $out
+                    if ($out -notmatch "nao encontrado|not found|No installed") { $removido = $true }
+                } catch { }
+            }
+
+            # Metodo 3: remover pasta diretamente
+            $claudeDeskPath = "$env:LOCALAPPDATA\AnthropicClaude"
+            if (Test-Path -LiteralPath $claudeDeskPath -ErrorAction SilentlyContinue) {
+                try { Remove-Item -LiteralPath $claudeDeskPath -Recurse -Force -ErrorAction SilentlyContinue; $removido = $true } catch { }
+            }
+
+            if ($removido) {
+                Write-Ok "Claude Desktop removido com sucesso."
             } else {
-                Write-Warn "winget nao disponivel. Remova o Claude Desktop pelo Painel de Controle."
+                Write-Warn "Nao foi possivel remover automaticamente. Remova pelo Painel de Controle > Aplicativos."
             }
         }
 
         if ($remCodexDesk) {
             Write-Step "Removendo Codex Desktop..."
+            $removido = $false
             if ($wingetOk) {
+                # Tenta pelo ID da Store e pelo nome
+                foreach ($id in @('9PLM9XGG6VKS', 'OpenAI.Codex')) {
+                    try {
+                        $out = & winget uninstall --id $id --silent --accept-source-agreements 2>&1 | Out-String
+                        if ($out -notmatch "nao encontrado|not found|No installed") {
+                            $removido = $true; break
+                        }
+                    } catch { }
+                }
+            }
+            if (-not $removido) {
                 try {
-                    & winget uninstall --id 9PLM9XGG6VKS --silent 2>&1 | ForEach-Object { Write-Host $_ }
-                    Write-Ok "Codex Desktop removido."
-                } catch { Write-Warn "Falha via winget. Tente remover manualmente pelo Painel de Controle." }
+                    $pkg = Get-AppxPackage -Name "*Codex*" -ErrorAction SilentlyContinue
+                    if ($pkg) {
+                        Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction SilentlyContinue
+                        $removido = $true
+                    }
+                } catch { }
+            }
+            if ($removido) {
+                Write-Ok "Codex Desktop removido com sucesso."
             } else {
-                Write-Warn "winget nao disponivel. Remova o Codex Desktop pelo Painel de Controle."
+                Write-Warn "Nao foi possivel remover automaticamente. Remova pelo Painel de Controle."
             }
         }
 
         if ($remOpenDesk) {
             Write-Step "Removendo OpenCode Desktop..."
+            $removido = $false
             if ($wingetOk) {
                 try {
-                    & winget uninstall --id SST.OpenCodeDesktop --silent 2>&1 | ForEach-Object { Write-Host $_ }
-                    Write-Ok "OpenCode Desktop removido."
-                } catch { Write-Warn "Falha via winget. Tente remover manualmente pelo Painel de Controle." }
+                    $out = & winget uninstall --id SST.OpenCodeDesktop --silent --accept-source-agreements 2>&1 | Out-String
+                    if ($out -notmatch "nao encontrado|not found|No installed") { $removido = $true }
+                } catch { }
+            }
+            if (-not $removido) {
+                try {
+                    $pkg = Get-AppxPackage -Name "*OpenCode*" -ErrorAction SilentlyContinue
+                    if ($pkg) {
+                        Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction SilentlyContinue
+                        $removido = $true
+                    }
+                } catch { }
+            }
+            if ($removido) {
+                Write-Ok "OpenCode Desktop removido com sucesso."
             } else {
-                Write-Warn "winget nao disponivel. Remova o OpenCode Desktop pelo Painel de Controle."
+                Write-Warn "Nao foi possivel remover automaticamente. Remova pelo Painel de Controle."
             }
         }
 
