@@ -3,9 +3,24 @@ $ErrorActionPreference = "Continue"
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.5.0"
+$SCRIPT_VERSION = "2.6.0"
 $SCRIPT_DATA    = "09/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.6.0"; Data = "09/04/2026"; Descricao = "Diagnostico executa apenas ferramentas com acao pendente, nao todas as selecionadas" },
+    [PSCustomObject]@{ Versao = "2.5.0"; Data = "09/04/2026"; Descricao = "Remocao CLI: limpeza de variaveis de ambiente (CLAUDE_CODE_GIT_BASH_PATH etc)" },
+    [PSCustomObject]@{ Versao = "2.5.0"; Data = "09/04/2026"; Descricao = "Remocao CLI: busca ampla por executavel em todos os locais conhecidos" },
+    [PSCustomObject]@{ Versao = "2.5.0"; Data = "09/04/2026"; Descricao = "Remocao CLI: limpeza de entradas do PATH apos remocao" },
+    [PSCustomObject]@{ Versao = "2.4.0"; Data = "09/04/2026"; Descricao = "Remocao melhorada: verifica resultado e tenta metodos alternativos" },
+    [PSCustomObject]@{ Versao = "2.4.0"; Data = "09/04/2026"; Descricao = "Remocao Claude Code: 4 metodos (winget, npm, binario nativo, pasta npm)" },
+    [PSCustomObject]@{ Versao = "2.4.0"; Data = "09/04/2026"; Descricao = "Remocao Claude Desktop: usa Update.exe nativo como primeiro metodo" },
+    [PSCustomObject]@{ Versao = "2.3.0"; Data = "09/04/2026"; Descricao = "Diagnostico aplicado em todas as opcoes de instalacao" },
+    [PSCustomObject]@{ Versao = "2.3.0"; Data = "09/04/2026"; Descricao = "Diagnostico refatorado como funcao reutilizavel Invoke-Diagnostico" },
+    [PSCustomObject]@{ Versao = "2.2.2"; Data = "09/04/2026"; Descricao = "npm instalado sempre no perfil do usuario logado mesmo rodando como admin" },
+    [PSCustomObject]@{ Versao = "2.2.1"; Data = "09/04/2026"; Descricao = "npm prefix forcado para perfil do usuario correto ao rodar como Administrador" },
+    [PSCustomObject]@{ Versao = "2.2.0"; Data = "09/04/2026"; Descricao = "Opcao 1 Tudo: diagnostico completo antes de instalar/atualizar" },
+    [PSCustomObject]@{ Versao = "2.2.0"; Data = "09/04/2026"; Descricao = "Diagnostico exibe status de cada ferramenta com versao atual e disponivel" },
+    [PSCustomObject]@{ Versao = "2.1.2"; Data = "09/04/2026"; Descricao = "Deteccao Codex Desktop: triplo fallback via ID, lista geral e AppxPackage" },
+    [PSCustomObject]@{ Versao = "2.1.1"; Data = "09/04/2026"; Descricao = "Corrigida deteccao de Codex Desktop e OpenCode Desktop ja instalados" },
     [PSCustomObject]@{ Versao = "2.1.0"; Data = "09/04/2026"; Descricao = "Corrigido bug C:\Program1: /DIR do Git Bash agora usa aspas para caminhos com espacos" },
     [PSCustomObject]@{ Versao = "2.1.0"; Data = "09/04/2026"; Descricao = "Melhorada deteccao do Git: busca em mais caminhos e no registro do Windows" },
     [PSCustomObject]@{ Versao = "2.1.0"; Data = "09/04/2026"; Descricao = "Auto-elevacao compativel com execucao via irm | iex (GitHub) e arquivo local" },
@@ -483,11 +498,23 @@ function Invoke-Diagnostico {
 
     $acoesPendentes = $diagItens | Where-Object { $_.Acao -ne "ok" }
 
+    # Monta hashtable de resultado com flags individuais
+    $resultado = @{
+        Prosseguir = $false
+        Git        = $false
+        ClaudeCLI  = $false
+        CodexCLI   = $false
+        OpenCode   = $false
+        ClaudeDesk = $false
+        CodexDesk  = $false
+        OpenDesk   = $false
+    }
+
     if ($acoesPendentes.Count -eq 0) {
         Write-Host "  Tudo instalado e atualizado! Nenhuma acao necessaria." -ForegroundColor Green
         Write-Host ""
         Write-Host "============================================================`n" -ForegroundColor Cyan
-        return $false  # Nao precisa prosseguir
+        return $resultado  # Prosseguir=false, nada a fazer
     }
 
     Write-Host "  Acoes necessarias:" -ForegroundColor White
@@ -499,10 +526,25 @@ function Invoke-Diagnostico {
     Write-Host "============================================================`n" -ForegroundColor Cyan
 
     if (-not (Confirm-Tecla "Deseja prosseguir?")) {
-        return $false  # Usuario cancelou
+        return $resultado  # Usuario cancelou
     }
     Write-Host ""
-    return $true  # Prosseguir com instalacao
+
+    # Define quais ferramentas precisam de acao
+    $resultado.Prosseguir = $true
+    foreach ($item in $acoesPendentes) {
+        switch -Wildcard ($item.Nome.Trim()) {
+            "Git Bash"      { $resultado.Git        = $true }
+            "Claude Code"   { $resultado.ClaudeCLI  = $true }
+            "Codex CLI"     { $resultado.CodexCLI   = $true }
+            "OpenCode CLI"  { $resultado.OpenCode   = $true }
+            "Claude Desktop"{ $resultado.ClaudeDesk = $true }
+            "Codex Desktop" { $resultado.CodexDesk  = $true }
+            "OpenCode Desk" { $resultado.OpenDesk   = $true }
+        }
+    }
+
+    return $resultado
 }
 
 # ----------------------------------------------------------
@@ -1011,9 +1053,9 @@ if ($wingetOk) {
 }
 
 # ----------------------------------------------------------
-# DIAGNOSTICO - chama funcao para as ferramentas selecionadas
+# DIAGNOSTICO - chama funcao e filtra apenas o que precisa de acao
 # ----------------------------------------------------------
-$prosseguir = Invoke-Diagnostico `
+$diagResultado = Invoke-Diagnostico `
     -CheckGit        $instalarGit `
     -CheckClaudeCLI  $instalarClaudeCLI `
     -CheckCodexCLI   $instalarCodexCLI `
@@ -1022,11 +1064,20 @@ $prosseguir = Invoke-Diagnostico `
     -CheckCodexDesk  $instalarCodexDesk `
     -CheckOpenDesk   $instalarOpenDesk
 
-if (-not $prosseguir) {
+if (-not $diagResultado.Prosseguir) {
     Write-Host ""
     if (-not (Confirm-Tecla "Voltar ao menu?")) { break }
     continue
 }
+
+# Atualiza flags para executar APENAS o que o diagnostico indicou precisar
+if ($instalarGit)        { $instalarGit        = $diagResultado.Git }
+if ($instalarClaudeCLI)  { $instalarClaudeCLI  = $diagResultado.ClaudeCLI }
+if ($instalarCodexCLI)   { $instalarCodexCLI   = $diagResultado.CodexCLI }
+if ($instalarOpenCode)   { $instalarOpenCode   = $diagResultado.OpenCode }
+if ($instalarClaudeDesk) { $instalarClaudeDesk = $diagResultado.ClaudeDesk }
+if ($instalarCodexDesk)  { $instalarCodexDesk  = $diagResultado.CodexDesk }
+if ($instalarOpenDesk)   { $instalarOpenDesk   = $diagResultado.OpenDesk }
 
 # ============================================================
 # 1. GIT BASH
