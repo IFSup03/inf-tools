@@ -3,9 +3,19 @@ $ErrorActionPreference = "Continue"
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.7.0"
+$SCRIPT_VERSION = "2.8.1"
 $SCRIPT_DATA    = "24/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.8.1"; Data = "24/04/2026"; Descricao = "TS/UAC: PATH final grava direto em HKU do usuario real + Broadcast-EnvChange garantido" },
+    [PSCustomObject]@{ Versao = "2.8.1"; Data = "24/04/2026"; Descricao = "TS/UAC: PATH inclui LocalAppData\Programs\Git\cmd para Git Bash user-scope" },
+    [PSCustomObject]@{ Versao = "2.8.1"; Data = "24/04/2026"; Descricao = "Git Bash: varre varios locais e detecta instalacao em escopo do admin elevado (local errado em TS)" },
+    [PSCustomObject]@{ Versao = "2.8.1"; Data = "24/04/2026"; Descricao = "Git Bash: quando em local errado, reinstala em %LOCALAPPDATA%\Programs\Git do usuario real via /CURRENTUSER" },
+    [PSCustomObject]@{ Versao = "2.8.1"; Data = "24/04/2026"; Descricao = "Git Bash: nova instalacao em TS usa /CURRENTUSER para evitar exigir admin" },
+    [PSCustomObject]@{ Versao = "2.8.0"; Data = "24/04/2026"; Descricao = "TS/UAC: detecta usuario interativo real (dono do explorer.exe) via WMI e registro" },
+    [PSCustomObject]@{ Versao = "2.8.0"; Data = "24/04/2026"; Descricao = "TS/UAC: npm install -g --prefix forcado para APPDATA do usuario real, nao do admin elevado" },
+    [PSCustomObject]@{ Versao = "2.8.0"; Data = "24/04/2026"; Descricao = "TS/UAC: PATH e env vars gravadas em HKU:\SID\Environment do usuario real" },
+    [PSCustomObject]@{ Versao = "2.8.0"; Data = "24/04/2026"; Descricao = "TS/UAC: Test-Path agora usa perfil do usuario real em todas as checagens" },
+    [PSCustomObject]@{ Versao = "2.8.0"; Data = "24/04/2026"; Descricao = "TS/UAC: notificacao de mudanca de ambiente via WM_SETTINGCHANGE apos gravar env vars" },
     [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Servidor: cache de tentativa de instalacao do Node.js (evita loop de 3 reinstalacoes)" },
     [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Servidor: deteccao de npm via Get-Command (substitui try/catch instavel em PS 5.1)" },
     [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Servidor: recarrega PATH de Machine+User apos MSI do Node.js" },
@@ -113,14 +123,227 @@ function Test-AVXSupport {
     }
 }
 
+# ----------------------------------------------------------
+# USUARIO REAL (interativo) vs admin elevado via UAC
+# Em TS/Terminal Server, o usuario comum roda o script e o UAC
+# sobe a janela como outra conta (ex.: admif). Precisamos instalar
+# tudo no perfil do usuario REAL, nao do admin elevado.
+# ----------------------------------------------------------
+$script:UsuarioReal = $null
+
+function Get-UsuarioInterativo {
+    # Retorna hashtable com dados do usuario interativo logado.
+    # Usa cache ($script:UsuarioReal) para nao repetir a query.
+    if ($null -ne $script:UsuarioReal) { return $script:UsuarioReal }
+
+    # Valores padrao: usuario atual (processo em execucao)
+    $info = [PSCustomObject]@{
+        Username           = $env:USERNAME
+        Domain             = $env:USERDOMAIN
+        Sid                = $null
+        UserProfile        = $env:USERPROFILE
+        AppData            = $env:APPDATA
+        LocalAppData       = $env:LOCALAPPDATA
+        ElevadoComOutroUsr = $false  # true se admif elevou sobre bi01
+    }
+
+    try {
+        # Descobre o dono da sessao interativa via explorer.exe
+        $procs = Get-CimInstance -ClassName Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop
+        foreach ($p in $procs) {
+            try {
+                $owner = Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop
+            } catch {
+                $owner = $null
+            }
+            if ($owner -and $owner.User -and $owner.ReturnValue -eq 0) {
+                # Preferencia pela primeira sessao interativa (consola) se houver varias
+                $realUser   = $owner.User
+                $realDomain = $owner.Domain
+                if ($realUser -and $realUser -ne $env:USERNAME) {
+                    $info.Username           = $realUser
+                    $info.Domain             = $realDomain
+                    $info.ElevadoComOutroUsr = $true
+                }
+                break
+            }
+        }
+
+        # Se usuario real e diferente do atual, resolve SID e paths do perfil
+        if ($info.ElevadoComOutroUsr) {
+            # Resolve SID
+            try {
+                $nt = if ($info.Domain) {
+                    New-Object System.Security.Principal.NTAccount($info.Domain, $info.Username)
+                } else {
+                    New-Object System.Security.Principal.NTAccount($info.Username)
+                }
+                $info.Sid = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
+            } catch { }
+
+            # Resolve caminho do perfil via ProfileList
+            if ($info.Sid) {
+                try {
+                    $profKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($info.Sid)"
+                    $profImg = (Get-ItemProperty -Path $profKey -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+                    # Expande variaveis como %SystemDrive%
+                    $profImg = [Environment]::ExpandEnvironmentVariables($profImg)
+                    if ($profImg -and (Test-Path -LiteralPath $profImg -ErrorAction SilentlyContinue)) {
+                        $info.UserProfile  = $profImg
+                        $info.AppData      = "$profImg\AppData\Roaming"
+                        $info.LocalAppData = "$profImg\AppData\Local"
+                    }
+                } catch { }
+            }
+        }
+    } catch {
+        # Qualquer falha: fica com valores padrao (processo atual)
+    }
+
+    $script:UsuarioReal = $info
+    return $info
+}
+
+# --- Grava variavel de ambiente no hive do usuario real ---
+# Em cenario UAC-com-outra-conta, escreve em HKU:\<SID>\Environment
+# do usuario interativo, nao no ramo do admin elevado.
+function Set-UserEnvVar {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Value,
+        [switch]$Append  # se setado, concatena ao valor existente com separador ;
+    )
+    $u = Get-UsuarioInterativo
+
+    if (-not $u.ElevadoComOutroUsr -or -not $u.Sid) {
+        # Cenario normal: grava no ramo do usuario atual
+        if ($Append) {
+            $existing = [Environment]::GetEnvironmentVariable($Name, "User")
+            if ($existing -and ($existing -split ";" | Where-Object { $_ -ieq $Value })) {
+                return  # ja presente, nao duplica
+            }
+            $new = if ($existing) { "$($existing.TrimEnd(';'));$Value" } else { $Value }
+            [Environment]::SetEnvironmentVariable($Name, $new, "User")
+        } else {
+            [Environment]::SetEnvironmentVariable($Name, $Value, "User")
+        }
+        return
+    }
+
+    # Cenario TS/UAC: grava no hive do usuario real
+    $hiveRoot   = "Registry::HKEY_USERS\$($u.Sid)"
+    $envKey     = "$hiveRoot\Environment"
+    $hiveExistia = Test-Path -LiteralPath $hiveRoot -ErrorAction SilentlyContinue
+    $carreguei   = $false
+
+    if (-not $hiveExistia) {
+        # Usuario nao esta com hive montado - carrega NTUSER.DAT temporariamente
+        $ntuser = Join-Path $u.UserProfile "NTUSER.DAT"
+        if (Test-Path -LiteralPath $ntuser -ErrorAction SilentlyContinue) {
+            $null = reg load "HKU\$($u.Sid)" "`"$ntuser`"" 2>&1
+            Start-Sleep -Milliseconds 300
+            $carreguei = Test-Path -LiteralPath $hiveRoot -ErrorAction SilentlyContinue
+        }
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $envKey -ErrorAction SilentlyContinue)) {
+            New-Item -Path $envKey -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        if ($Append) {
+            $existing = $null
+            try {
+                $existing = (Get-ItemProperty -Path $envKey -Name $Name -ErrorAction Stop).$Name
+            } catch { }
+            if ($existing -and ($existing -split ";" | Where-Object { $_ -ieq $Value })) {
+                return  # ja presente
+            }
+            $new = if ($existing) { "$($existing.TrimEnd(';'));$Value" } else { $Value }
+            # PATH e ExpandString, outras vars normalmente String
+            if ($Name -ieq "Path") {
+                New-ItemProperty -Path $envKey -Name $Name -Value $new -PropertyType ExpandString -Force | Out-Null
+            } else {
+                New-ItemProperty -Path $envKey -Name $Name -Value $new -PropertyType String -Force | Out-Null
+            }
+        } else {
+            if ($Name -ieq "Path") {
+                New-ItemProperty -Path $envKey -Name $Name -Value $Value -PropertyType ExpandString -Force | Out-Null
+            } else {
+                New-ItemProperty -Path $envKey -Name $Name -Value $Value -PropertyType String -Force | Out-Null
+            }
+        }
+    } finally {
+        if ($carreguei) {
+            [gc]::Collect()
+            Start-Sleep -Milliseconds 300
+            $null = reg unload "HKU\$($u.Sid)" 2>&1
+        }
+    }
+}
+
+# --- Le variavel de ambiente do hive do usuario real ---
+function Get-UserEnvVar {
+    param([Parameter(Mandatory)][string]$Name)
+    $u = Get-UsuarioInterativo
+
+    if (-not $u.ElevadoComOutroUsr -or -not $u.Sid) {
+        return [Environment]::GetEnvironmentVariable($Name, "User")
+    }
+
+    $envKey = "Registry::HKEY_USERS\$($u.Sid)\Environment"
+    $hiveExistia = Test-Path -LiteralPath "Registry::HKEY_USERS\$($u.Sid)" -ErrorAction SilentlyContinue
+    $carreguei = $false
+    if (-not $hiveExistia) {
+        $ntuser = Join-Path $u.UserProfile "NTUSER.DAT"
+        if (Test-Path -LiteralPath $ntuser -ErrorAction SilentlyContinue) {
+            $null = reg load "HKU\$($u.Sid)" "`"$ntuser`"" 2>&1
+            Start-Sleep -Milliseconds 300
+            $carreguei = $true
+        }
+    }
+    try {
+        if (Test-Path -LiteralPath $envKey -ErrorAction SilentlyContinue) {
+            return (Get-ItemProperty -Path $envKey -Name $Name -ErrorAction SilentlyContinue).$Name
+        }
+        return $null
+    } finally {
+        if ($carreguei) {
+            [gc]::Collect()
+            Start-Sleep -Milliseconds 300
+            $null = reg unload "HKU\$($u.Sid)" 2>&1
+        }
+    }
+}
+
+# --- Dispara WM_SETTINGCHANGE para avisar Explorer sobre mudancas em env ---
+function Broadcast-EnvChange {
+    try {
+        if (-not ("NativeMethods" -as [type])) {
+            Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
+                [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true, CharSet=System.Runtime.InteropServices.CharSet.Auto)]
+                public static extern System.IntPtr SendMessageTimeout(
+                    System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam,
+                    uint fuFlags, uint uTimeout, out System.UIntPtr lpdwResult);
+"@ -ErrorAction SilentlyContinue
+        }
+        $HWND_BROADCAST = [System.IntPtr]0xFFFF
+        $WM_SETTINGCHANGE = 0x001A
+        $result = [System.UIntPtr]::Zero
+        [void][Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [System.UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result)
+    } catch { }
+}
+
 # --- Deteccao confiavel de npm (PS 5.1 compativel) ---
 # Usa Get-Command (nao depende de $ErrorActionPreference=Stop)
+# Em UAC-elevado-com-outra-conta, considera o APPDATA do usuario real.
 function Test-NpmDisponivel {
-    # Garante que os paths padrao do Node estao na sessao antes de testar
+    $u = Get-UsuarioInterativo
     $nodePaths = @(
         "$env:ProgramFiles\nodejs",
         "${env:ProgramFiles(x86)}\nodejs",
-        "$env:APPDATA\npm"
+        "$($u.AppData)\npm",     # perfil do usuario real
+        "$env:APPDATA\npm"       # fallback: perfil do admin elevado
     )
     foreach ($p in $nodePaths) {
         if ((Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$p*")) {
@@ -199,9 +422,11 @@ function Install-NodeJS {
         Update-SessionPath
 
         # Garante caminhos padrao tambem (caso PATH do registro ainda nao reflita)
+        $u = Get-UsuarioInterativo
         $nodePaths = @(
             "$env:ProgramFiles\nodejs",
             "${env:ProgramFiles(x86)}\nodejs",
+            "$($u.AppData)\npm",
             "$env:APPDATA\npm"
         )
         foreach ($p in $nodePaths) {
@@ -257,14 +482,17 @@ function Ensure-NodeJS {
 
 # --- Verifica e corrige o PATH para ferramentas CLI ---
 function Test-And-Fix-Path {
+    $u = Get-UsuarioInterativo
     $caminhos = @(
-        "$env:APPDATA\npm",
+        "$($u.AppData)\npm",
         "$env:ProgramFiles\nodejs",
         "${env:ProgramFiles(x86)}\nodejs",
-        "$env:USERPROFILE\.local\bin"
+        "$($u.UserProfile)\.local\bin"
     )
 
-    $pathUsuario  = [Environment]::GetEnvironmentVariable("Path", "User")
+    # Le PATH do usuario REAL (hive correto em cenario UAC)
+    $pathUsuario  = Get-UserEnvVar -Name "Path"
+    if (-not $pathUsuario) { $pathUsuario = "" }
     $pathMaquina  = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $pathCompleto = "$pathMaquina;$pathUsuario"
     $atualizado   = $false
@@ -272,7 +500,7 @@ function Test-And-Fix-Path {
     $corrigidos   = @()
 
     foreach ($dir in $caminhos) {
-        if (-not (Test-Path $dir)) { continue }  # Ignora pastas que nao existem
+        if (-not (Test-Path -LiteralPath $dir -ErrorAction SilentlyContinue)) { continue }
 
         $noPath = ($pathCompleto -split ";") -notcontains $dir
         if ($noPath) {
@@ -290,8 +518,8 @@ function Test-And-Fix-Path {
     }
 
     if ($atualizado) {
-        [Environment]::SetEnvironmentVariable("Path", $pathUsuario, "User")
-        Write-Warn "PATH incompleto. Entradas adicionadas:"
+        Set-UserEnvVar -Name "Path" -Value $pathUsuario
+        Write-Warn "PATH incompleto. Entradas adicionadas ao usuario '$($u.Username)':"
         foreach ($c in $corrigidos) { Write-Ok "  + $c" }
         Write-Warn "Abra um novo terminal para que as alteracoes tenham efeito."
     } else {
@@ -299,6 +527,33 @@ function Test-And-Fix-Path {
     }
 
     return $problemas.Count -eq 0
+}
+
+# --- Wrapper de 'npm install -g' que forca instalacao no perfil do usuario real ---
+# Em UAC-elevado-com-outra-conta, usa --prefix apontando para o APPDATA do usuario
+# interativo, nao do admin elevado. Tambem garante diretorio do npm cache coerente.
+function Invoke-NpmInstallGlobal {
+    param([string]$Package)
+
+    $u = Get-UsuarioInterativo
+    $npmPrefix = "$($u.AppData)\npm"
+
+    # Garante diretorio do prefix (admin tem permissao para criar no perfil do usuario)
+    if (-not (Test-Path -LiteralPath $npmPrefix -ErrorAction SilentlyContinue)) {
+        try { New-Item -ItemType Directory -Path $npmPrefix -Force -ErrorAction Stop | Out-Null } catch { }
+    }
+
+    # Usa cache no perfil do usuario real tambem
+    $npmCache = "$($u.AppData)\npm-cache"
+    if (-not (Test-Path -LiteralPath $npmCache -ErrorAction SilentlyContinue)) {
+        try { New-Item -ItemType Directory -Path $npmCache -Force -ErrorAction Stop | Out-Null } catch { }
+    }
+
+    # --prefix sobrescreve config user/global; --cache ajusta cache
+    & npm install -g $Package --prefix "$npmPrefix" --cache "$npmCache" 2>&1 |
+        ForEach-Object { Write-Host $_ }
+
+    return $LASTEXITCODE
 }
 
 # --- Verifica/instala/atualiza pacote npm global ---
@@ -319,12 +574,20 @@ function Invoke-NpmTool {
         return
     }
 
+    $u = Get-UsuarioInterativo
+    $npmBinUser = "$($u.AppData)\npm"
+
+    # Adiciona bin do usuario real na sessao para que 'codex', 'opencode', 'claude' sejam encontrados
+    if ((Test-Path -LiteralPath $npmBinUser -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$npmBinUser*")) {
+        $env:Path = "$npmBinUser;$env:Path"
+    }
+
     $installed = $false
     $currentVer = $null
     try {
         $out = & $Cmd --version 2>&1
         $currentVer = ($out | Out-String).Trim()
-        $installed = $true
+        if ($LASTEXITCODE -eq 0 -and $currentVer -match '\d') { $installed = $true }
     } catch { $installed = $false }
 
     if ($installed) {
@@ -344,8 +607,8 @@ function Invoke-NpmTool {
             } else {
                 Write-Warn "Atualizacao disponivel: $installedV -> $latestVer"
                 Pause-Readable 2
-                Write-Step "Atualizando $Label via npm..."
-                & npm install -g $Package 2>&1 | ForEach-Object { Write-Host $_ }
+                Write-Step "Atualizando $Label via npm (prefix=$npmBinUser)..."
+                $null = Invoke-NpmInstallGlobal -Package $Package
                 Write-Ok "$Label atualizado com sucesso."
                 Pause-Readable 3
             }
@@ -354,9 +617,9 @@ function Invoke-NpmTool {
             Pause-Readable 3
         }
     } else {
-        Write-Step "$Label nao encontrado. Iniciando instalacao via npm..."
+        Write-Step "$Label nao encontrado. Instalando em: $npmBinUser"
         try {
-            & npm install -g $Package 2>&1 | ForEach-Object { Write-Host $_ }
+            $null = Invoke-NpmInstallGlobal -Package $Package
             Write-Ok "$Label instalado com sucesso."
             Write-Warn "Abra um novo terminal para usar o comando '$Cmd'."
             Pause-Readable 3
@@ -1064,29 +1327,52 @@ try {
 # ----------------------------------------------------------
 # Atualiza PATH na sessao para detectar ferramentas ja instaladas
 # ----------------------------------------------------------
+# Detecta usuario real (em cenario UAC com outra conta, retorna dono do explorer.exe)
+$usuarioReal = Get-UsuarioInterativo
+
+if ($usuarioReal.ElevadoComOutroUsr) {
+    Write-Warn "UAC detectado: script rodando como '$env:USERNAME', usuario interativo e '$($usuarioReal.Username)'."
+    Write-Ok  "Instalacoes CLI serao direcionadas para: $($usuarioReal.UserProfile)"
+}
+
 $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-            "$env:USERPROFILE\.local\bin" + ";" +
+            "$($usuarioReal.UserProfile)\.local\bin" + ";" +
+            "$($usuarioReal.AppData)\npm" + ";" +
             [Environment]::GetEnvironmentVariable("Path", "User")
 
 # ----------------------------------------------------------
 # Garante que npm instala no perfil do usuario logado
-# (evita instalacao no perfil do Administrador quando elevado)
+# (em TS/UAC, APPDATA do usuario real, nao do admin elevado)
 # ----------------------------------------------------------
-$npmGlobalDir = $null
+$npmGlobalDir = "$($usuarioReal.AppData)\npm"
 try {
-    # Detecta o usuario real (nao o admin elevado)
-    $usuarioReal = [Environment]::GetEnvironmentVariable("USERNAME", "User")
-    if (-not $usuarioReal) { $usuarioReal = $env:USERNAME }
+    # Cria o diretorio no perfil do usuario real (admin tem permissao)
+    if (-not (Test-Path -LiteralPath $npmGlobalDir -ErrorAction SilentlyContinue)) {
+        New-Item -ItemType Directory -Path $npmGlobalDir -Force -ErrorAction SilentlyContinue | Out-Null
+    }
 
-    # Define o prefix do npm para o usuario correto
-    $npmPrefix = "$env:APPDATA\npm"
-    $null = & npm config set prefix $npmPrefix 2>&1
-    $npmGlobalDir = $npmPrefix
+    # Nao setamos npm config set prefix aqui porque quando elevado como admif,
+    # afetaria o .npmrc do admif, nao o do usuario real. O --prefix explicito
+    # em cada 'npm install -g' (via Invoke-NpmInstallGlobal) resolve isso.
 
     # Garante que esta no PATH da sessao
-    if ($env:Path -notlike "*$npmPrefix*") {
-        $env:Path = "$npmPrefix;$env:Path"
+    if ($env:Path -notlike "*$npmGlobalDir*") {
+        $env:Path = "$npmGlobalDir;$env:Path"
     }
+
+    # Se o usuario real tem seu proprio .npmrc, atualiza o prefix nele tambem
+    # (nao obrigatorio, mas ajuda quando o usuario rodar 'npm install -g' manualmente depois)
+    $realNpmRc = Join-Path $usuarioReal.UserProfile ".npmrc"
+    try {
+        $lines = @()
+        if (Test-Path -LiteralPath $realNpmRc -ErrorAction SilentlyContinue) {
+            $lines = Get-Content -LiteralPath $realNpmRc -ErrorAction SilentlyContinue |
+                     Where-Object { $_ -notmatch '^\s*prefix\s*=' -and $_ -notmatch '^\s*cache\s*=' }
+        }
+        $lines += "prefix=$npmGlobalDir"
+        $lines += "cache=$($usuarioReal.AppData)\npm-cache"
+        Set-Content -LiteralPath $realNpmRc -Value $lines -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch { }
 } catch { }
 
 # ----------------------------------------------------------
@@ -1136,47 +1422,89 @@ if ($instalarGit) {
 
     Write-Step "Verificando Git Bash..."
 
+    # Resolve usuario interativo real (TS/UAC-aware)
+    $uGit = Get-UsuarioInterativo
+    if ($uGit.ElevadoComOutroUsr) {
+        Write-Warn "Git Bash sera checado no perfil do usuario interativo '$($uGit.Username)', nao em '$env:USERNAME'."
+    }
+
+    # Candidatos de instalacao (ordem: user-scope real > system > user-scope do elevado > x86)
     $gitCandidatePaths = @(
-        "C:\Program Files\Git",
-        "C:\Program Files (x86)\Git",
-        "$env:LOCALAPPDATA\Programs\Git",
-        "$env:ProgramFiles\Git",
-        "${env:ProgramFiles(x86)}\Git"
+        @{ Path = "$($uGit.LocalAppData)\Programs\Git"; Escopo = "user (real)"   ; Correto = $true  },
+        @{ Path = "C:\Program Files\Git";               Escopo = "system"         ; Correto = $true  },
+        @{ Path = "$env:ProgramFiles\Git";              Escopo = "system (proc)"  ; Correto = $true  },
+        @{ Path = "${env:ProgramFiles(x86)}\Git";       Escopo = "system x86"     ; Correto = $true  },
+        @{ Path = "C:\Program Files (x86)\Git";         Escopo = "system x86"     ; Correto = $true  },
+        @{ Path = "$env:LOCALAPPDATA\Programs\Git";     Escopo = "user (elevado)" ; Correto = $false }
     )
 
-    $gitBashPath = $null
-    $gitCmdExe   = $null
+    $gitBashPath      = $null
+    $gitCmdExe        = $null
+    $gitEscopoAtual   = $null
+    $gitLocalErrado   = $false
+    $gitCandidatosEncontrados = @()
 
-    foreach ($candidate in $gitCandidatePaths) {
-        $candidateCmd = "$candidate\cmd\git.exe"
-        if (Test-Path $candidateCmd) {
-            $gitBashPath = $candidate
-            $gitCmdExe   = $candidateCmd
-            break
+    foreach ($c in $gitCandidatePaths) {
+        $candidateCmd = "$($c.Path)\cmd\git.exe"
+        if (Test-Path -LiteralPath $candidateCmd -ErrorAction SilentlyContinue) {
+            $gitCandidatosEncontrados += [PSCustomObject]@{ Path = $c.Path; CmdExe = $candidateCmd; Escopo = $c.Escopo; Correto = $c.Correto }
+            # Primeira descoberta vira a "atual", salvo se for substituida por uma correta adiante
+            if (-not $gitBashPath) {
+                $gitBashPath    = $c.Path
+                $gitCmdExe      = $candidateCmd
+                $gitEscopoAtual = $c.Escopo
+                $gitLocalErrado = -not $c.Correto
+            } elseif ($gitLocalErrado -and $c.Correto) {
+                # Prefere instalacao em local correto se ja tinhamos detectado em local errado
+                $gitBashPath    = $c.Path
+                $gitCmdExe      = $candidateCmd
+                $gitEscopoAtual = $c.Escopo
+                $gitLocalErrado = $false
+            }
         }
     }
 
+    if ($gitCandidatosEncontrados.Count -gt 1) {
+        Write-Warn "Foram encontradas $($gitCandidatosEncontrados.Count) instalacoes do Git Bash:"
+        foreach ($g in $gitCandidatosEncontrados) {
+            $tag = if ($g.Correto) { "OK" } else { "LOCAL ERRADO" }
+            Write-Host "   - [$tag] $($g.Path) ($($g.Escopo))" -ForegroundColor DarkGray
+        }
+    }
+
+    if ($gitLocalErrado) {
+        Write-Warn "Git Bash atualmente apontando para local INCORRETO: $gitBashPath ($gitEscopoAtual)."
+        Write-Warn "Em Terminal Server, o Git deve ficar em '$($uGit.LocalAppData)\Programs\Git' ou 'C:\Program Files\Git'."
+    }
+
+    # Fallback: Get-Command no PATH do processo atual
     if (-not $gitBashPath) {
         try {
             $gitInPath   = (Get-Command git -ErrorAction Stop).Source
             $gitBashPath = Split-Path (Split-Path $gitInPath -Parent) -Parent
             $gitCmdExe   = $gitInPath
+            $gitEscopoAtual = "PATH"
             Write-Ok "Git encontrado via PATH: $gitInPath"
         } catch { }
     }
 
-    # Busca no registro do Windows como ultimo recurso
+    # Fallback: registro Windows (HKLM e hive do usuario real se possivel)
     if (-not $gitBashPath) {
         try {
             $regPaths = @(
                 "HKLM:\SOFTWARE\GitForWindows",
                 "HKCU:\SOFTWARE\GitForWindows"
             )
+            # Se temos SID do usuario real, tenta tambem o hive dele
+            if ($uGit.Sid) {
+                $regPaths = @("Registry::HKEY_USERS\$($uGit.Sid)\SOFTWARE\GitForWindows") + $regPaths
+            }
             foreach ($reg in $regPaths) {
                 $regVal = Get-ItemProperty -Path $reg -Name InstallPath -ErrorAction SilentlyContinue
-                if ($regVal -and (Test-Path "$($regVal.InstallPath)\cmd\git.exe")) {
+                if ($regVal -and (Test-Path -LiteralPath "$($regVal.InstallPath)\cmd\git.exe" -ErrorAction SilentlyContinue)) {
                     $gitBashPath = $regVal.InstallPath
                     $gitCmdExe   = "$gitBashPath\cmd\git.exe"
+                    $gitEscopoAtual = "registro"
                     Write-Ok "Git encontrado via registro: $gitBashPath"
                     break
                 }
@@ -1194,8 +1522,42 @@ if ($instalarGit) {
         $asset     = $null
     }
 
+    # ---- Se encontrado em local ERRADO, oferece reinstalacao em local correto ----
+    if ($gitLocalErrado -and $asset) {
+        Write-Warn "Reinstalando Git Bash no perfil correto para evitar problemas em sessoes multiplas..."
+        $gitBashPathCorreto = "$($uGit.LocalAppData)\Programs\Git"
+        $gitInstaller = "$env:TEMP\git-installer.exe"
+        try {
+            Write-Step "Baixando Git Bash..."
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $gitInstaller -UseBasicParsing
+            Write-Step "Instalando em: $gitBashPathCorreto (user-scope do usuario real)"
+            $installArgs = @(
+                "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-",
+                "/CURRENTUSER",
+                "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS",
+                "/COMPONENTS=icons,ext\reg\shellhere,assoc,assoc_sh",
+                "/DIR=`"$gitBashPathCorreto`""
+            )
+            Start-Process -FilePath $gitInstaller -ArgumentList $installArgs -Wait -NoNewWindow
+            if (Test-Path -LiteralPath "$gitBashPathCorreto\cmd\git.exe") {
+                $gitBashPath    = $gitBashPathCorreto
+                $gitCmdExe      = "$gitBashPathCorreto\cmd\git.exe"
+                $gitEscopoAtual = "user (real)"
+                $gitLocalErrado = $false
+                Write-Ok "Git Bash reinstalado em: $gitBashPath"
+            } else {
+                Write-Warn "Reinstalacao nao produziu Git em $gitBashPathCorreto; mantendo instalacao anterior."
+            }
+        } catch {
+            Write-Fail "Erro ao reinstalar Git Bash no local correto: $_"
+        } finally {
+            if (Test-Path $gitInstaller) { Remove-Item $gitInstaller -Force }
+        }
+        Pause-Readable 3
+    }
+
     if ($gitBashPath) {
-        Write-Ok "Git Bash encontrado em: $gitBashPath"
+        Write-Ok "Git Bash encontrado em: $gitBashPath ($gitEscopoAtual)"
 
         if ($latestVer -and (Test-Path $gitCmdExe)) {
             try {
@@ -1214,12 +1576,17 @@ if ($instalarGit) {
                     $gitInstaller = "$env:TEMP\git-installer.exe"
                     try {
                         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $gitInstaller -UseBasicParsing
+                        # Se o Git esta em user-scope, atualiza com /CURRENTUSER
+                        $extraArgs = @()
+                        if ($gitBashPath -like "$($uGit.LocalAppData)\*" -or $gitBashPath -like "$env:LOCALAPPDATA\*") {
+                            $extraArgs += "/CURRENTUSER"
+                        }
                         $installArgs = @(
                             "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-",
                             "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS",
                             "/COMPONENTS=icons,ext\reg\shellhere,assoc,assoc_sh",
                             "/DIR=`"$gitBashPath`""
-                        )
+                        ) + $extraArgs
                         Start-Process -FilePath $gitInstaller -ArgumentList $installArgs -Wait -NoNewWindow
                         Write-Ok "Git Bash atualizado para $latestVer com sucesso."
                         Pause-Readable 3
@@ -1240,22 +1607,25 @@ if ($instalarGit) {
         }
 
     } else {
-        $gitBashPath = "$env:LOCALAPPDATA\Programs\Git"
+        # Nenhuma instalacao encontrada - instala em user-scope do usuario real (preferido em TS)
+        $gitBashPath = "$($uGit.LocalAppData)\Programs\Git"
         $gitCmdExe   = "$gitBashPath\cmd\git.exe"
 
         if (-not $asset) {
             Write-Fail "Nao foi possivel obter o instalador do Git Bash. Verifique sua conexao."
             Pause-Readable 3
         } else {
-            Write-Step "Git Bash nao encontrado. Iniciando instalacao..."
+            Write-Step "Git Bash nao encontrado. Iniciando instalacao em user-scope do usuario real..."
+            Write-Ok "Destino: $gitBashPath"
             Write-Ok "Versao encontrada: $($asset.name)"
             $gitInstaller = "$env:TEMP\git-installer.exe"
             try {
                 Write-Step "Baixando Git Bash..."
                 Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $gitInstaller -UseBasicParsing
-                Write-Step "Instalando Git Bash (modo silencioso)..."
+                Write-Step "Instalando Git Bash (modo silencioso, /CURRENTUSER)..."
                 $installArgs = @(
                     "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-",
+                    "/CURRENTUSER",
                     "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS",
                     "/COMPONENTS=icons,ext\reg\shellhere,assoc,assoc_sh",
                     "/DIR=`"$gitBashPath`""
@@ -1279,13 +1649,14 @@ if ($instalarGit) {
 
     if ($gitBashPath -and $instalarClaudeCLI) {
         Write-Step "Configurando CLAUDE_CODE_GIT_BASH_PATH..."
-        $currentVal = [Environment]::GetEnvironmentVariable("CLAUDE_CODE_GIT_BASH_PATH", "User")
+        $currentVal = Get-UserEnvVar -Name "CLAUDE_CODE_GIT_BASH_PATH"
         if ($currentVal -eq $gitBashPath) {
             Write-Ok "CLAUDE_CODE_GIT_BASH_PATH ja esta configurado. Nenhuma alteracao necessaria."
         } else {
-            [Environment]::SetEnvironmentVariable("CLAUDE_CODE_GIT_BASH_PATH", $gitBashPath, "User")
+            $null = Set-UserEnvVar -Name "CLAUDE_CODE_GIT_BASH_PATH" -Value $gitBashPath
             $env:CLAUDE_CODE_GIT_BASH_PATH = $gitBashPath
-            Write-Ok "CLAUDE_CODE_GIT_BASH_PATH = $gitBashPath"
+            $null = Broadcast-EnvChange
+            Write-Ok "CLAUDE_CODE_GIT_BASH_PATH = $gitBashPath (usuario '$($uGit.Username)')"
         }
         Pause-Readable 3
     }
@@ -1412,7 +1783,7 @@ if ($instalarClaudeCLI) {
                     if (-not (Ensure-NodeJS -WingetOk $wingetOk)) {
                         Write-Fail "Node.js nao disponivel. Nao foi possivel atualizar."
                     } else {
-                        & npm install -g @anthropic-ai/claude-code 2>&1 | ForEach-Object { Write-Host $_ }
+                        $null = Invoke-NpmInstallGlobal -Package "@anthropic-ai/claude-code"
                         Write-Ok "Claude Code atualizado com sucesso."
                     }
                 } else {
@@ -1434,10 +1805,16 @@ if ($instalarClaudeCLI) {
                 Write-Fail "Node.js nao disponivel. Nao e possivel instalar o Claude Code."
                 Pause-Readable 3
             } else {
-                Write-Step "Instalando Claude Code via npm..."
+                $u = Get-UsuarioInterativo
+                Write-Step "Instalando Claude Code via npm (prefix=$($u.AppData)\npm)..."
                 try {
-                    & npm install -g @anthropic-ai/claude-code 2>&1 | ForEach-Object { Write-Host $_ }
-                    try { $null = & claude --version 2>&1; $claudeOk = $true } catch { }
+                    $null = Invoke-NpmInstallGlobal -Package "@anthropic-ai/claude-code"
+                    # Adiciona bin ao PATH da sessao para validar
+                    $npmBin = "$($u.AppData)\npm"
+                    if ((Test-Path -LiteralPath $npmBin) -and ($env:Path -notlike "*$npmBin*")) {
+                        $env:Path = "$npmBin;$env:Path"
+                    }
+                    try { $null = & claude --version 2>&1; if ($LASTEXITCODE -eq 0) { $claudeOk = $true } } catch { }
                     if ($claudeOk) {
                         Write-Ok "Claude Code instalado com sucesso via npm."
                     } else {
@@ -1653,27 +2030,44 @@ if ($instalarOpenCode) {
 $algumaCLI = $instalarGit -or $instalarClaudeCLI -or $instalarCodexCLI -or $instalarOpenCode
 
 if ($algumaCLI) {
-    $targetDir = "$env:USERPROFILE\.local\bin"
+    # ---- SEMPRE resolve o usuario interativo real (suporta UAC com outro admin) ----
+    $uPath = Get-UsuarioInterativo
+    if ($uPath.ElevadoComOutroUsr) {
+        Write-Warn "PATH sera gravado no hive do usuario interativo '$($uPath.Username)' (nao em '$env:USERNAME')."
+    }
+
+    $targetDir = "$($uPath.UserProfile)\.local\bin"
 
     Write-Step "Verificando diretorio $targetDir..."
-    if (-not (Test-Path $targetDir)) {
-        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-        Write-Ok "Diretorio criado: $targetDir"
+    if (-not (Test-Path -LiteralPath $targetDir -ErrorAction SilentlyContinue)) {
+        try {
+            New-Item -ItemType Directory -Path $targetDir -Force -ErrorAction Stop | Out-Null
+            Write-Ok "Diretorio criado: $targetDir"
+        } catch {
+            Write-Warn "Nao foi possivel criar ${targetDir}: $($_.Exception.Message)"
+        }
     } else {
         Write-Ok "Diretorio ja existe: $targetDir"
     }
 
     # Diretorios que precisam estar no PATH para CMD e PowerShell
-    # Marcamos quais podem ser criados automaticamente (apenas dentro do perfil do usuario)
+    # Marcamos quais podem ser criados automaticamente (apenas dentro do perfil do usuario real)
     $pathDirs = @(
-        @{ Path = $targetDir;                    Criar = $true  }  # %USERPROFILE%\.local\bin
-        @{ Path = "$env:APPDATA\npm";            Criar = $true  }  # npm do usuario
-        @{ Path = "$env:ProgramFiles\nodejs";    Criar = $false }  # protegido - so se existir
+        @{ Path = $targetDir;                                Criar = $true  },  # %USERPROFILE%\.local\bin (usuario real)
+        @{ Path = "$($uPath.AppData)\npm";                   Criar = $true  },  # npm do usuario real
+        @{ Path = "$($uPath.LocalAppData)\Programs\Git\cmd"; Criar = $false },  # Git Bash user-scope (preferido em TS)
+        @{ Path = "$($uPath.LocalAppData)\Programs\Git\bin"; Criar = $false },  # Git Bash user-scope
+        @{ Path = "$env:ProgramFiles\nodejs";                Criar = $false },  # Node.js system-wide
+        @{ Path = "$env:ProgramFiles\Git\cmd";               Criar = $false },  # Git Bash system-wide
+        @{ Path = "$env:ProgramFiles\Git\bin";               Criar = $false }   # Git Bash system-wide
     )
 
-    Write-Step "Verificando e corrigindo PATH..."
+    Write-Step "Verificando e corrigindo PATH do usuario real..."
     $null = Test-And-Fix-Path
-    $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+
+    # Le PATH direto do hive do usuario interativo real (nao do usuario elevado)
+    $currentPath = Get-UserEnvVar -Name "Path"
+    if ([string]::IsNullOrWhiteSpace($currentPath)) { $currentPath = "" }
     $pathAtualizado = $false
 
     foreach ($entrada in $pathDirs) {
@@ -1689,30 +2083,46 @@ if ($algumaCLI) {
                     continue
                 }
             } else {
-                # Diretorio protegido (ex.: Program Files) - so adiciona ao PATH se ja existir
-                Write-Warn "Ignorado (nao existe e requer admin): $dir"
+                # Diretorio protegido ou opcional - so adiciona ao PATH se ja existir
                 continue
             }
         }
         $jaExiste = ($currentPath -split ";") | Where-Object { $_ -ieq $dir }
         if (-not $jaExiste) {
             $currentPath = ($currentPath.TrimEnd(";") + ";" + $dir).TrimStart(";")
-            Write-Ok "Adicionado ao PATH: $dir"
+            Write-Ok "Adicionado ao PATH (usuario real): $dir"
             $pathAtualizado = $true
         } else {
-            Write-Ok "Ja no PATH: $dir"
+            Write-Ok "Ja no PATH (usuario real): $dir"
         }
     }
 
     if ($pathAtualizado) {
-        [Environment]::SetEnvironmentVariable("Path", $currentPath, "User")
-        Write-Ok "PATH do usuario atualizado com sucesso."
+        # Grava no hive do usuario interativo real (HKU:\SID\Environment)
+        $okSet = Set-UserEnvVar -Name "Path" -Value $currentPath
+        if ($okSet) {
+            Write-Ok "PATH do usuario '$($uPath.Username)' atualizado com sucesso."
+            # Broadcast WM_SETTINGCHANGE para que Explorer/novos processos vejam as mudancas
+            $null = Broadcast-EnvChange
+            Write-Ok "Broadcast WM_SETTINGCHANGE enviado (novos terminais ja vao enxergar)."
+        } else {
+            Write-Warn "Falha ao gravar PATH no hive do usuario real. Fallback escopo User local..."
+            try {
+                [Environment]::SetEnvironmentVariable("Path", $currentPath, "User")
+                Write-Ok "PATH gravado em fallback (escopo User do processo atual)."
+            } catch {
+                Write-Fail "Nao foi possivel gravar PATH: $($_.Exception.Message)"
+            }
+        }
         Write-Warn "Abra um novo CMD ou PowerShell para que as alteracoes tenham efeito."
         Pause-Readable 3
+    } else {
+        Write-Ok "PATH ja contempla todas as entradas necessarias."
     }
 
-    # Atualiza PATH na sessao atual (PowerShell corrente)
-    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + $currentPath
+    # Atualiza PATH na sessao atual (PowerShell corrente) combinando Machine + User(real)
+    $pathMaquinaAtual = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $env:Path = ($pathMaquinaAtual.TrimEnd(";") + ";" + $currentPath.TrimStart(";")).TrimEnd(";")
 }
 
 # ----------------------------------------------------------
