@@ -3,9 +3,15 @@ $ErrorActionPreference = "Continue"
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.6.0"
-$SCRIPT_DATA    = "09/04/2026"
+$SCRIPT_VERSION = "2.7.0"
+$SCRIPT_DATA    = "24/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Servidor: cache de tentativa de instalacao do Node.js (evita loop de 3 reinstalacoes)" },
+    [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Servidor: deteccao de npm via Get-Command (substitui try/catch instavel em PS 5.1)" },
+    [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Servidor: recarrega PATH de Machine+User apos MSI do Node.js" },
+    [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Servidor: nao tenta criar diretorios protegidos como C:\Program Files\nodejs" },
+    [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Servidor: deteccao de ProductType via CIM (fallback WMI) mais robusta" },
+    [PSCustomObject]@{ Versao = "2.7.0"; Data = "24/04/2026"; Descricao = "Install-NodeJS: aguarda MSI, sonda npm por ate 15s antes de desistir" },
     [PSCustomObject]@{ Versao = "2.6.0"; Data = "09/04/2026"; Descricao = "Diagnostico executa apenas ferramentas com acao pendente, nao todas as selecionadas" },
     [PSCustomObject]@{ Versao = "2.5.0"; Data = "09/04/2026"; Descricao = "Remocao CLI: limpeza de variaveis de ambiente (CLAUDE_CODE_GIT_BASH_PATH etc)" },
     [PSCustomObject]@{ Versao = "2.5.0"; Data = "09/04/2026"; Descricao = "Remocao CLI: busca ampla por executavel em todos os locais conhecidos" },
@@ -107,6 +113,47 @@ function Test-AVXSupport {
     }
 }
 
+# --- Deteccao confiavel de npm (PS 5.1 compativel) ---
+# Usa Get-Command (nao depende de $ErrorActionPreference=Stop)
+function Test-NpmDisponivel {
+    # Garante que os paths padrao do Node estao na sessao antes de testar
+    $nodePaths = @(
+        "$env:ProgramFiles\nodejs",
+        "${env:ProgramFiles(x86)}\nodejs",
+        "$env:APPDATA\npm"
+    )
+    foreach ($p in $nodePaths) {
+        if ((Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$p*")) {
+            $env:Path = "$p;$env:Path"
+        }
+    }
+    $cmd = Get-Command npm -ErrorAction SilentlyContinue
+    if (-not $cmd) { return $false }
+    # Confirma executando (pode existir .cmd quebrado)
+    try {
+        $out = & $cmd.Source --version 2>$null
+        return ($LASTEXITCODE -eq 0 -and $out -match '\d')
+    } catch {
+        return $false
+    }
+}
+
+# --- Recarrega PATH combinado de Machine+User (apos instalacoes que mexem no PATH) ---
+function Update-SessionPath {
+    try {
+        $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $user    = [Environment]::GetEnvironmentVariable("Path", "User")
+        $combo   = @()
+        if ($machine) { $combo += $machine }
+        if ($user)    { $combo += $user }
+        $env:Path = ($combo -join ";")
+    } catch { }
+}
+
+# --- Cache para evitar reinstalar Node.js em loop na mesma sessao ---
+$script:NodeJSTentado   = $false
+$script:NodeJSResultado = $false
+
 # --- Instala Node.js para todo o sistema (ALLUSERS=1) ---
 function Install-NodeJS {
     param([bool]$WingetOk)
@@ -148,27 +195,35 @@ function Install-NodeJS {
     }
 
     if ($nodeInstalled) {
-        # Atualiza PATH da sessao para encontrar o npm recem instalado
+        # Recarrega PATH completo do registro (MSI atualizou Machine)
+        Update-SessionPath
+
+        # Garante caminhos padrao tambem (caso PATH do registro ainda nao reflita)
         $nodePaths = @(
             "$env:ProgramFiles\nodejs",
             "${env:ProgramFiles(x86)}\nodejs",
             "$env:APPDATA\npm"
         )
         foreach ($p in $nodePaths) {
-            if ((Test-Path $p) -and ($env:Path -notlike "*$p*")) {
+            if ((Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$p*")) {
                 $env:Path = "$p;$env:Path"
             }
         }
 
-        # Verifica se npm esta disponivel agora
+        # Sondagem: aguarda ate 15s pelo npm ficar disponivel
+        # (em servidores o MSI pode concluir antes do shim do npm existir)
         $npmOk = $false
-        try { $null = & npm --version 2>&1; $npmOk = $true } catch { }
+        for ($i = 0; $i -lt 15; $i++) {
+            if (Test-NpmDisponivel) { $npmOk = $true; break }
+            Start-Sleep -Seconds 1
+        }
 
         if ($npmOk) {
             Write-Ok "Node.js instalado com sucesso."
             return $true
         } else {
-            Write-Warn "Node.js instalado. Feche e reabra o terminal e execute o script novamente."
+            Write-Warn "Node.js instalado, mas npm nao ficou disponivel na sessao atual."
+            Write-Warn "Feche e reabra o terminal e execute o script novamente."
             return $false
         }
     }
@@ -177,32 +232,27 @@ function Install-NodeJS {
 }
 
 # --- Garante que Node.js/npm esta disponivel, instalando se necessario ---
+# Usa cache por sessao para nao reinstalar em loop quando falha na 1a chamada
 function Ensure-NodeJS {
     param([bool]$WingetOk)
 
-    # Atualiza PATH da sessao para caminhos padrao do Node
-    $nodePaths = @(
-        "$env:ProgramFiles\nodejs",
-        "${env:ProgramFiles(x86)}\nodejs",
-        "$env:APPDATA\npm"
-    )
-    foreach ($p in $nodePaths) {
-        if ((Test-Path $p) -and ($env:Path -notlike "*$p*")) {
-            $env:Path = "$p;$env:Path"
-        }
-    }
-
-    # Verifica se npm ja esta disponivel
-    $npmOk = $false
-    try { $null = & npm --version 2>&1; $npmOk = $true } catch { }
-
-    if ($npmOk) {
+    # Verifica se ja esta disponivel (refresca PATH e testa)
+    if (Test-NpmDisponivel) {
+        $script:NodeJSTentado   = $true
+        $script:NodeJSResultado = $true
         return $true
     }
 
-    # npm nao encontrado — instalar Node.js
+    # Ja tentamos instalar nesta sessao e falhou? Nao repetir.
+    if ($script:NodeJSTentado) {
+        return $script:NodeJSResultado
+    }
+
+    # npm nao encontrado - instalar Node.js (primeira e unica tentativa)
     Write-Warn "Node.js/npm nao encontrado. Instalando automaticamente..."
-    return (Install-NodeJS -WingetOk $WingetOk)
+    $script:NodeJSTentado   = $true
+    $script:NodeJSResultado = Install-NodeJS -WingetOk $WingetOk
+    return $script:NodeJSResultado
 }
 
 # --- Verifica e corrige o PATH para ferramentas CLI ---
@@ -1321,14 +1371,23 @@ if ($instalarClaudeCLI) {
     } catch { }
 
     # Detecta se e servidor Windows (ProductType 2=DC, 3=Server) ou maquina local (1=Workstation)
+    # Preferencia por CIM (mais rapido e confiavel que WMI em servidores hardened)
     $eServidor = $false
     try {
-        $productType = (Get-WmiObject -Class Win32_OperatingSystem).ProductType
-        # ProductType 1 = Workstation, 2 = Domain Controller, 3 = Server
-        if ($productType -eq 2 -or $productType -eq 3) {
-            $eServidor = $true
+        $productType = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType
+        if ($productType -eq 2 -or $productType -eq 3) { $eServidor = $true }
+    } catch {
+        try {
+            $productType = (Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop).ProductType
+            if ($productType -eq 2 -or $productType -eq 3) { $eServidor = $true }
+        } catch {
+            # Fallback: checa pelo nome do SO no registro
+            try {
+                $osName = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction Stop).ProductName
+                if ($osName -match "Server") { $eServidor = $true }
+            } catch { $eServidor = $false }
         }
-    } catch { $eServidor = $false }
+    }
 
     if ($eServidor) {
         Write-Warn "Ambiente de servidor detectado. O instalador oficial pode falhar (Bun requer AVX)."
@@ -1605,10 +1664,11 @@ if ($algumaCLI) {
     }
 
     # Diretorios que precisam estar no PATH para CMD e PowerShell
+    # Marcamos quais podem ser criados automaticamente (apenas dentro do perfil do usuario)
     $pathDirs = @(
-        $targetDir,                        # %USERPROFILE%\.local\bin
-        "$env:APPDATA\npm",               # executaveis instalados pelo npm (codex, opencode, claude)
-        "$env:ProgramFiles\nodejs"        # node e npm do sistema
+        @{ Path = $targetDir;                    Criar = $true  }  # %USERPROFILE%\.local\bin
+        @{ Path = "$env:APPDATA\npm";            Criar = $true  }  # npm do usuario
+        @{ Path = "$env:ProgramFiles\nodejs";    Criar = $false }  # protegido - so se existir
     )
 
     Write-Step "Verificando e corrigindo PATH..."
@@ -1616,9 +1676,23 @@ if ($algumaCLI) {
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $pathAtualizado = $false
 
-    foreach ($dir in $pathDirs) {
-        if (-not (Test-Path $dir)) {
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    foreach ($entrada in $pathDirs) {
+        $dir   = $entrada.Path
+        $criar = $entrada.Criar
+
+        if (-not (Test-Path -LiteralPath $dir -ErrorAction SilentlyContinue)) {
+            if ($criar) {
+                try {
+                    New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+                } catch {
+                    Write-Warn "Nao foi possivel criar ${dir}: $($_.Exception.Message)"
+                    continue
+                }
+            } else {
+                # Diretorio protegido (ex.: Program Files) - so adiciona ao PATH se ja existir
+                Write-Warn "Ignorado (nao existe e requer admin): $dir"
+                continue
+            }
         }
         $jaExiste = ($currentPath -split ";") | Where-Object { $_ -ieq $dir }
         if (-not $jaExiste) {
