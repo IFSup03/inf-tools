@@ -2017,7 +2017,7 @@ if ($instalarCodexCLI) {
 }
 
 # ============================================================
-# 6. OPENCODE � via npm
+# 6. OPENCODE   via npm
 # ============================================================
 if ($instalarOpenCode) {
     Invoke-NpmTool -Label "OpenCode" -Cmd "opencode" -Package "opencode-ai" -NpmName "opencode-ai"
