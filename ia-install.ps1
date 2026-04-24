@@ -3,9 +3,19 @@ $ErrorActionPreference = "Continue"
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.8.1"
+$SCRIPT_VERSION = "2.9.1"
 $SCRIPT_DATA    = "24/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.9.1"; Data = "24/04/2026"; Descricao = "Fix: Codex CLI agora usa Invoke-NpmTool (passa --prefix/--cache explicitos, evita ENOENT)" },
+    [PSCustomObject]@{ Versao = "2.9.1"; Data = "24/04/2026"; Descricao = "Fix: Repair-NpmRc detecta e corrige .npmrc com linhas concatenadas (prefix=X\npmcache=Y)" },
+    [PSCustomObject]@{ Versao = "2.9.1"; Data = "24/04/2026"; Descricao = "Fix: .npmrc gravado via System.IO.File + UTF8 sem BOM + CRLF explicito" },
+    [PSCustomObject]@{ Versao = "2.9.1"; Data = "24/04/2026"; Descricao = "Fix: Invoke-NpmInstallGlobal repara .npmrc do usuario efetivo antes do install" },
+    [PSCustomObject]@{ Versao = "2.9.0"; Data = "24/04/2026"; Descricao = "Visual: dashboard com banner, fases numeradas, simbolos unicode e resumo final" },
+    [PSCustomObject]@{ Versao = "2.9.0"; Data = "24/04/2026"; Descricao = "Visual: Show-Spinner para esperas longas, Write-Phase com contador N/Total" },
+    [PSCustomObject]@{ Versao = "2.9.0"; Data = "24/04/2026"; Descricao = "Download: nova funcao Invoke-FastDownload via HttpClient (5-10x mais rapido)" },
+    [PSCustomObject]@{ Versao = "2.9.0"; Data = "24/04/2026"; Descricao = "Download: barra de progresso visual com %, MB/s e ETA em tempo real" },
+    [PSCustomObject]@{ Versao = "2.9.0"; Data = "24/04/2026"; Descricao = "Download: TLS 1.2/1.3 + ConnectionLimit 100 + buffer 1MB para throughput maximo" },
+    [PSCustomObject]@{ Versao = "2.9.0"; Data = "24/04/2026"; Descricao = "Download: fallback automatico para Invoke-WebRequest se HttpClient falhar" },
     [PSCustomObject]@{ Versao = "2.8.1"; Data = "24/04/2026"; Descricao = "TS/UAC: PATH final grava direto em HKU do usuario real + Broadcast-EnvChange garantido" },
     [PSCustomObject]@{ Versao = "2.8.1"; Data = "24/04/2026"; Descricao = "TS/UAC: PATH inclui LocalAppData\Programs\Git\cmd para Git Bash user-scope" },
     [PSCustomObject]@{ Versao = "2.8.1"; Data = "24/04/2026"; Descricao = "Git Bash: varre varios locais e detecta instalacao em escopo do admin elevado (local errado em TS)" },
@@ -84,11 +94,295 @@ try {
     [Win32.K32VT]::SetConsoleMode($handle, ($mode -bor 0x0004)) | Out-Null
 } catch { <# silencioso se nao suportado #> }
 
-# --- Cores para output ---
-function Write-Step  { param($msg) Write-Host "`n[>>] $msg" -ForegroundColor Cyan }
-function Write-Ok    { param($msg) Write-Host "[ OK] $msg" -ForegroundColor Green }
-function Write-Warn  { param($msg) Write-Host "[AVS] $msg" -ForegroundColor Yellow }
-function Write-Fail  { param($msg) Write-Host "[ERR] $msg" -ForegroundColor Red }
+# --- Cores para output (visual dashboard) ---
+$script:PhaseCurrent    = 0
+$script:PhaseTotal      = 0
+$script:ScriptStartTime = $null
+$script:InstallResults  = @()  # resumo final
+
+# Caracteres (UTF-8): simbolos e box-drawing
+$script:SymOk    = [char]0x2713   # ✓
+$script:SymFail  = [char]0x2717   # ✗
+$script:SymWarn  = [char]0x26A0   # ⚠
+$script:SymStep  = [char]0x25B6   # ▶
+$script:SymInfo  = [char]0x2139   # ℹ
+$script:SymBullet= [char]0x2022   # •
+
+function Start-Dashboard {
+    param([int]$TotalPhases = 0)
+    $script:PhaseCurrent    = 0
+    $script:PhaseTotal      = $TotalPhases
+    $script:ScriptStartTime = Get-Date
+    $script:InstallResults  = @()
+}
+
+function Write-Banner {
+    try { Clear-Host } catch { }
+    $v = $SCRIPT_VERSION
+    $line1 = "  ==============================================================="
+    Write-Host ""
+    Write-Host "  +=============================================================+" -ForegroundColor Cyan
+    Write-Host "  |                                                             |" -ForegroundColor Cyan
+    Write-Host "  |     I A   T O O L S   I N S T A L L E R                     |" -ForegroundColor White
+    Write-Host "  |                                                             |" -ForegroundColor Cyan
+    Write-Host "  |     Claude  $script:SymBullet  Codex  $script:SymBullet  OpenCode                           |" -ForegroundColor DarkCyan
+    Write-Host "  |                                                             |" -ForegroundColor Cyan
+    Write-Host ("  |     v{0,-6}                                                  |" -f $v) -ForegroundColor DarkGray
+    Write-Host "  |                                                             |" -ForegroundColor Cyan
+    Write-Host "  +=============================================================+" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+function Write-Phase {
+    param([string]$Title)
+    $script:PhaseCurrent++
+    $prefix = if ($script:PhaseTotal -gt 0) { "[$($script:PhaseCurrent)/$($script:PhaseTotal)]" } else { "[$($script:PhaseCurrent)]" }
+    $elapsed = if ($script:ScriptStartTime) { "  " + $script:SymBullet + "  " + ((Get-Date) - $script:ScriptStartTime).ToString("mm\:ss") + " transcorridos" } else { "" }
+
+    $title = "FASE $prefix  $Title"
+    if ($title.Length -gt 58) { $title = $title.Substring(0, 58) }
+    $titleLine = $title.PadRight(58)
+
+    Write-Host ""
+    Write-Host "  +-----------------------------------------------------------+" -ForegroundColor DarkCyan
+    Write-Host ("  | {0} |" -f $titleLine) -ForegroundColor Cyan
+    if ($elapsed) {
+        $elapsedLine = $elapsed.PadRight(58)
+        if ($elapsedLine.Length -gt 58) { $elapsedLine = $elapsedLine.Substring(0,58) }
+        Write-Host ("  | {0} |" -f $elapsedLine) -ForegroundColor DarkGray
+    }
+    Write-Host "  +-----------------------------------------------------------+" -ForegroundColor DarkCyan
+}
+
+function Write-Step  { param($msg) Write-Host ("  {0} {1}" -f $script:SymStep, $msg) -ForegroundColor Cyan }
+function Write-Ok    { param($msg) Write-Host ("  {0} {1}" -f $script:SymOk,   $msg) -ForegroundColor Green }
+function Write-Warn  { param($msg) Write-Host ("  {0} {1}" -f $script:SymWarn, $msg) -ForegroundColor Yellow }
+function Write-Fail  { param($msg) Write-Host ("  {0} {1}" -f $script:SymFail, $msg) -ForegroundColor Red }
+function Write-Info  { param($msg) Write-Host ("  {0} {1}" -f $script:SymInfo, $msg) -ForegroundColor Gray }
+
+function Show-Spinner {
+    param([ScriptBlock]$Action, [string]$Message = "Processando...", [int]$TimeoutSec = 300)
+    $chars = @('|','/','-','\')
+    $i = 0
+    $job = Start-Job -ScriptBlock $Action
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($job.State -eq 'Running' -and (Get-Date) -lt $deadline) {
+        $c = $chars[$i % $chars.Length]
+        $line = "  $c  $Message"
+        [Console]::Write("`r" + $line.PadRight(80))
+        Start-Sleep -Milliseconds 120
+        $i++
+    }
+    [Console]::Write("`r" + (" " * 80) + "`r")
+    if ($job.State -eq 'Running') {
+        Stop-Job $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Write-Fail "Timeout aguardando operacao."
+        return $null
+    }
+    $result = Receive-Job $job -Wait -AutoRemoveJob -ErrorAction SilentlyContinue
+    return $result
+}
+
+function Add-InstallResult {
+    param(
+        [string]$Nome,
+        [string]$Status,   # "OK", "FALHOU", "PULADO", "ATUALIZADO"
+        [string]$Versao = "",
+        [string]$Local = "",
+        [string]$Obs = ""
+    )
+    $script:InstallResults += [PSCustomObject]@{
+        Nome    = $Nome
+        Status  = $Status
+        Versao  = $Versao
+        Local   = $Local
+        Obs     = $Obs
+    }
+}
+
+function Show-Summary {
+    $elapsed = if ($script:ScriptStartTime) { ((Get-Date) - $script:ScriptStartTime).ToString("mm\:ss") } else { "00:00" }
+    Write-Host ""
+    Write-Host "  +=============================================================+" -ForegroundColor Cyan
+    Write-Host ("  |  RESUMO DA INSTALACAO  {0,-37} |" -f ("(tempo total: $elapsed)")) -ForegroundColor White
+    Write-Host "  +=============================================================+" -ForegroundColor Cyan
+
+    if (-not $script:InstallResults -or $script:InstallResults.Count -eq 0) {
+        Write-Host "  |  (Nenhuma ferramenta processada)                            |" -ForegroundColor DarkGray
+    } else {
+        Write-Host ("  | {0,-16} {1,-12} {2,-28} |" -f "FERRAMENTA","STATUS","VERSAO / OBS") -ForegroundColor DarkGray
+        Write-Host "  +-------------------------------------------------------------+" -ForegroundColor DarkCyan
+        foreach ($r in $script:InstallResults) {
+            $cor = switch ($r.Status) {
+                "OK"         { "Green" }
+                "ATUALIZADO" { "Green" }
+                "PULADO"     { "DarkGray" }
+                "FALHOU"     { "Red" }
+                default      { "Yellow" }
+            }
+            $obs = if ($r.Versao) { $r.Versao } elseif ($r.Obs) { $r.Obs } else { "" }
+            if ($obs.Length -gt 28) { $obs = $obs.Substring(0,25) + "..." }
+            $nome = $r.Nome; if ($nome.Length -gt 16) { $nome = $nome.Substring(0,16) }
+            $status = $r.Status; if ($status.Length -gt 12) { $status = $status.Substring(0,12) }
+            Write-Host ("  | {0,-16} {1,-12} {2,-28} |" -f $nome, $status, $obs) -ForegroundColor $cor
+        }
+    }
+    Write-Host "  +=============================================================+" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+# ----------------------------------------------------------
+# Invoke-FastDownload: download via HttpClient (5-10x mais rapido
+# que Invoke-WebRequest), com barra de progresso visual
+# (%, MB baixados/total, MB/s, ETA) e fallback automatico.
+# ----------------------------------------------------------
+function Invoke-FastDownload {
+    param(
+        [Parameter(Mandatory=$true)][string]$Url,
+        [Parameter(Mandatory=$true)][string]$OutFile,
+        [string]$Label = "",
+        [int]$BufferSize = 1048576,
+        [int]$TimeoutSec = 600,
+        [switch]$Silent
+    )
+
+    # Garante TLS moderno (importante para GitHub/Microsoft)
+    try {
+        $tls = [Net.SecurityProtocolType]'Tls12'
+        try { $tls = $tls -bor [Net.SecurityProtocolType]'Tls13' } catch { }
+        [Net.ServicePointManager]::SecurityProtocol = $tls
+    } catch { }
+    try { [Net.ServicePointManager]::DefaultConnectionLimit = 100 } catch { }
+
+    $oldProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+
+    if (-not $Label) { $Label = Split-Path -Leaf $OutFile }
+
+    $outDir = Split-Path -Parent $OutFile
+    if ($outDir -and -not (Test-Path -LiteralPath $outDir -ErrorAction SilentlyContinue)) {
+        try { New-Item -ItemType Directory -Path $outDir -Force -ErrorAction Stop | Out-Null } catch { }
+    }
+
+    $handler = $null
+    $client  = $null
+    $response= $null
+    $sourceStream = $null
+    $targetStream = $null
+    $ok = $false
+
+    try {
+        $handler = New-Object System.Net.Http.HttpClientHandler
+        $handler.AllowAutoRedirect = $true
+        try { $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate } catch { }
+
+        $client = New-Object System.Net.Http.HttpClient($handler)
+        $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+        try { $client.DefaultRequestHeaders.UserAgent.ParseAdd("ia-install/$SCRIPT_VERSION") } catch { }
+
+        $response = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            throw "HTTP $([int]$response.StatusCode) $($response.ReasonPhrase)"
+        }
+
+        $totalBytes = -1L
+        try { if ($response.Content.Headers.ContentLength) { $totalBytes = [long]$response.Content.Headers.ContentLength } } catch { }
+        $totalMB = if ($totalBytes -gt 0) { [math]::Round($totalBytes / 1MB, 2) } else { 0 }
+
+        $sourceStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $targetStream = [System.IO.File]::Create($OutFile)
+
+        $buffer    = New-Object byte[] $BufferSize
+        $totalRead = 0L
+        $startTime = Get-Date
+        $lastUpdate= $startTime
+
+        if (-not $Silent) {
+            Write-Host ""
+            $tamStr = if ($totalMB -gt 0) { "($totalMB MB)" } else { "(tamanho desconhecido)" }
+            Write-Host ("  {0}  Baixando: {1} {2}" -f $script:SymStep, $Label, $tamStr) -ForegroundColor Cyan
+        }
+
+        while ($true) {
+            $read = $sourceStream.Read($buffer, 0, $buffer.Length)
+            if ($read -le 0) { break }
+            $targetStream.Write($buffer, 0, $read)
+            $totalRead += $read
+
+            if (-not $Silent) {
+                $now = Get-Date
+                if (($now - $lastUpdate).TotalMilliseconds -ge 120) {
+                    $elapsedSec = ($now - $startTime).TotalSeconds
+                    if ($elapsedSec -lt 0.001) { $elapsedSec = 0.001 }
+                    $speedBps = $totalRead / $elapsedSec
+                    $speedMBs = $speedBps / 1MB
+                    $recMB    = [math]::Round($totalRead / 1MB, 2)
+
+                    if ($totalBytes -gt 0) {
+                        $percent = [math]::Min(100.0, ($totalRead * 100.0 / $totalBytes))
+                        $barWidth = 28
+                        $filled = [int][math]::Floor($barWidth * $percent / 100)
+                        if ($filled -gt $barWidth) { $filled = $barWidth }
+                        if ($filled -lt 0) { $filled = 0 }
+                        $bar = ("#" * $filled) + ("-" * ($barWidth - $filled))
+                        $etaSec = if ($speedBps -gt 0 -and $totalBytes -gt $totalRead) { [int](($totalBytes - $totalRead) / $speedBps) } else { 0 }
+                        $etaStr = "{0:D2}:{1:D2}" -f ([int]([int]$etaSec / 60)), ([int]$etaSec % 60)
+                        $line = "  [{0}] {1,5:N1}% | {2,7:N2}/{3,7:N2} MB | {4,5:N1} MB/s | ETA {5}" -f $bar, $percent, $recMB, $totalMB, $speedMBs, $etaStr
+                    } else {
+                        $line = ("  Recebido: {0,8:N2} MB | {1,5:N1} MB/s | {2,6:N1}s" -f $recMB, $speedMBs, $elapsedSec)
+                    }
+
+                    try { [Console]::Write("`r" + $line.PadRight(90)) } catch { }
+                    $lastUpdate = $now
+                }
+            }
+        }
+
+        try { $targetStream.Flush() } catch { }
+
+        if (-not $Silent) {
+            $elapsedFinal = ((Get-Date) - $startTime).TotalSeconds
+            if ($elapsedFinal -lt 0.001) { $elapsedFinal = 0.001 }
+            $finalMB    = [math]::Round($totalRead / 1MB, 2)
+            $finalSpeed = ($totalRead / $elapsedFinal) / 1MB
+            try { [Console]::Write("`r" + (" " * 90) + "`r") } catch { }
+            Write-Host ("  {0} Download concluido: {1:N2} MB em {2:N1}s ({3:N1} MB/s)" -f $script:SymOk, $finalMB, $elapsedFinal, $finalSpeed) -ForegroundColor Green
+        }
+        $ok = $true
+    }
+    catch {
+        if (-not $Silent) {
+            try { [Console]::Write("`r" + (" " * 90) + "`r") } catch { }
+            Write-Warn "Download rapido falhou: $($_.Exception.Message)"
+            Write-Info "Tentando fallback via Invoke-WebRequest..."
+        }
+    }
+    finally {
+        if ($targetStream) { try { $targetStream.Dispose() } catch { } }
+        if ($sourceStream) { try { $sourceStream.Dispose() } catch { } }
+        if ($response)     { try { $response.Dispose() }     catch { } }
+        if ($client)       { try { $client.Dispose() }       catch { } }
+        if ($handler)      { try { $handler.Dispose() }      catch { } }
+        $ProgressPreference = $oldProgress
+    }
+
+    if (-not $ok) {
+        # Fallback: Invoke-WebRequest com progresso silenciado (ainda 5x mais rapido que o default)
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
+            if (-not $Silent) { Write-Ok "Download concluido via fallback." }
+            $ok = $true
+        } catch {
+            if (-not $Silent) { Write-Fail "Falha no download: $($_.Exception.Message)" }
+            $ok = $false
+        }
+        $ProgressPreference = $oldProgress
+    }
+
+    return $ok
+}
 
 # --- Pausa legivel entre etapas (segundos) ---
 function Pause-Readable { param([int]$Seconds = 3) Start-Sleep -Seconds $Seconds }
@@ -406,7 +700,7 @@ function Install-NodeJS {
             $nodeVersion = $lts.version
             $nodeUrl     = "https://nodejs.org/dist/$nodeVersion/node-$nodeVersion-x64.msi"
             $nodeMsi     = "$env:TEMP\node-lts.msi"
-            Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeMsi -UseBasicParsing
+            $null = Invoke-FastDownload -Url $nodeUrl -OutFile $nodeMsi -Label "Node.js $nodeVersion MSI"
             Write-Step "Instalando Node.js $nodeVersion para todos os usuarios..."
             # ALLUSERS=1 garante instalacao para todo o sistema, nao so o usuario atual
             Start-Process msiexec.exe -ArgumentList "/i `"$nodeMsi`" /quiet /norestart ALLUSERS=1" -Wait
@@ -529,6 +823,53 @@ function Test-And-Fix-Path {
     return $problemas.Count -eq 0
 }
 
+# --- Repara .npmrc corrompido e define prefix/cache corretos ---
+# Detecta linhas malformadas tipo "prefix=X\npmcache=Y" (bug observado em TS/UAC onde
+# Set-Content concatenou valores) e reescreve com CRLF + UTF8 sem BOM.
+function Repair-NpmRc {
+    param(
+        [string]$Path,
+        [string]$Prefix,
+        [string]$Cache
+    )
+
+    try {
+        $linhas = New-Object System.Collections.Generic.List[string]
+
+        if (Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue) {
+            try {
+                $conteudo = [System.IO.File]::ReadAllText($Path)
+                # Quebra antes de "cache=" ou "prefix=" quando embutidos no meio da linha
+                $conteudo = $conteudo -replace '(?<!\r?\n)(?<!^)cache\s*=', "`r`ncache="
+                $conteudo = $conteudo -replace '(?<!\r?\n)(?<!^)prefix\s*=', "`r`nprefix="
+                foreach ($l in ($conteudo -split "`r?`n")) {
+                    if ([string]::IsNullOrWhiteSpace($l)) { continue }
+                    # Pula linhas prefix/cache (serao reescritas com valores corretos)
+                    if ($l -match '^\s*(prefix|cache)\s*=') { continue }
+                    # Pula linhas com "prefix=" ou "cache=" embutido (corrompidas)
+                    if ($l -match '\S\s*(prefix|cache)\s*=') { continue }
+                    [void]$linhas.Add($l)
+                }
+            } catch { }
+        }
+
+        [void]$linhas.Add("prefix=$Prefix")
+        [void]$linhas.Add("cache=$Cache")
+
+        # Garante que o diretorio pai existe
+        $parent = Split-Path -Parent $Path
+        if ($parent -and -not (Test-Path -LiteralPath $parent -ErrorAction SilentlyContinue)) {
+            try { New-Item -ItemType Directory -Path $parent -Force -ErrorAction SilentlyContinue | Out-Null } catch { }
+        }
+
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($Path, (($linhas -join "`r`n") + "`r`n"), $utf8NoBom)
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 # --- Wrapper de 'npm install -g' que forca instalacao no perfil do usuario real ---
 # Em UAC-elevado-com-outra-conta, usa --prefix apontando para o APPDATA do usuario
 # interativo, nao do admin elevado. Tambem garante diretorio do npm cache coerente.
@@ -547,6 +888,17 @@ function Invoke-NpmInstallGlobal {
     $npmCache = "$($u.AppData)\npm-cache"
     if (-not (Test-Path -LiteralPath $npmCache -ErrorAction SilentlyContinue)) {
         try { New-Item -ItemType Directory -Path $npmCache -Force -ErrorAction Stop | Out-Null } catch { }
+    }
+
+    # Repara .npmrc do usuario que roda o processo (pode ter sido corrompido por bug anterior)
+    # npm lê o .npmrc do usuario efetivo; quando elevado como admif, e admif\.npmrc.
+    $npmrcAtual = Join-Path $env:USERPROFILE ".npmrc"
+    [void](Repair-NpmRc -Path $npmrcAtual -Prefix $npmPrefix -Cache $npmCache)
+
+    # Tambem repara o .npmrc do usuario real (ajuda quando ele rodar 'npm install -g' manualmente)
+    if ($u.UserProfile -and ($u.UserProfile -ne $env:USERPROFILE)) {
+        $npmrcReal = Join-Path $u.UserProfile ".npmrc"
+        [void](Repair-NpmRc -Path $npmrcReal -Prefix $npmPrefix -Cache $npmCache)
     }
 
     # --prefix sobrescreve config user/global; --cache ajusta cache
@@ -1360,19 +1712,19 @@ try {
         $env:Path = "$npmGlobalDir;$env:Path"
     }
 
-    # Se o usuario real tem seu proprio .npmrc, atualiza o prefix nele tambem
-    # (nao obrigatorio, mas ajuda quando o usuario rodar 'npm install -g' manualmente depois)
+    # Repara/reescreve .npmrc do usuario real (detecta e corrige linhas malformadas tipo
+    # "prefix=X\npmcache=Y" observadas em v2.9.0 e anteriores). Helper Repair-NpmRc
+    # garante CRLF + UTF8 sem BOM.
     $realNpmRc = Join-Path $usuarioReal.UserProfile ".npmrc"
-    try {
-        $lines = @()
-        if (Test-Path -LiteralPath $realNpmRc -ErrorAction SilentlyContinue) {
-            $lines = Get-Content -LiteralPath $realNpmRc -ErrorAction SilentlyContinue |
-                     Where-Object { $_ -notmatch '^\s*prefix\s*=' -and $_ -notmatch '^\s*cache\s*=' }
-        }
-        $lines += "prefix=$npmGlobalDir"
-        $lines += "cache=$($usuarioReal.AppData)\npm-cache"
-        Set-Content -LiteralPath $realNpmRc -Value $lines -Encoding UTF8 -ErrorAction SilentlyContinue
-    } catch { }
+    $realNpmCache = "$($usuarioReal.AppData)\npm-cache"
+    [void](Repair-NpmRc -Path $realNpmRc -Prefix $npmGlobalDir -Cache $realNpmCache)
+
+    # Tambem repara o .npmrc do usuario que roda o processo (admif em cenarios UAC)
+    # para evitar que o npm leia um arquivo corrompido de execucoes anteriores.
+    if ($env:USERPROFILE -and ($env:USERPROFILE -ne $usuarioReal.UserProfile)) {
+        $adminNpmRc = Join-Path $env:USERPROFILE ".npmrc"
+        [void](Repair-NpmRc -Path $adminNpmRc -Prefix $npmGlobalDir -Cache $realNpmCache)
+    }
 } catch { }
 
 # ----------------------------------------------------------
@@ -1416,9 +1768,24 @@ if ($instalarCodexDesk)  { $instalarCodexDesk  = $diagResultado.CodexDesk }
 if ($instalarOpenDesk)   { $instalarOpenDesk   = $diagResultado.OpenDesk }
 
 # ============================================================
+# DASHBOARD: inicia banner e contador de fases
+# ============================================================
+$fasesAtivas = 0
+if ($instalarGit)        { $fasesAtivas++ }
+if ($instalarClaudeDesk) { $fasesAtivas++ }
+if ($instalarClaudeCLI)  { $fasesAtivas++ }
+if ($instalarCodexDesk)  { $fasesAtivas++ }
+if ($instalarOpenDesk)   { $fasesAtivas++ }
+if ($instalarCodexCLI)   { $fasesAtivas++ }
+if ($instalarOpenCode)   { $fasesAtivas++ }
+Start-Dashboard -TotalPhases $fasesAtivas
+Write-Banner
+
+# ============================================================
 # 1. GIT BASH
 # ============================================================
 if ($instalarGit) {
+    Write-Phase "Git Bash"
 
     Write-Step "Verificando Git Bash..."
 
@@ -1529,7 +1896,7 @@ if ($instalarGit) {
         $gitInstaller = "$env:TEMP\git-installer.exe"
         try {
             Write-Step "Baixando Git Bash..."
-            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $gitInstaller -UseBasicParsing
+            $null = Invoke-FastDownload -Url $asset.browser_download_url -OutFile $gitInstaller -Label "Git Bash"
             Write-Step "Instalando em: $gitBashPathCorreto (user-scope do usuario real)"
             $installArgs = @(
                 "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-",
@@ -1575,7 +1942,7 @@ if ($instalarGit) {
                     Write-Step "Baixando e instalando atualizacao do Git Bash..."
                     $gitInstaller = "$env:TEMP\git-installer.exe"
                     try {
-                        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $gitInstaller -UseBasicParsing
+                        $null = Invoke-FastDownload -Url $asset.browser_download_url -OutFile $gitInstaller -Label "Git Bash $latestVer"
                         # Se o Git esta em user-scope, atualiza com /CURRENTUSER
                         $extraArgs = @()
                         if ($gitBashPath -like "$($uGit.LocalAppData)\*" -or $gitBashPath -like "$env:LOCALAPPDATA\*") {
@@ -1621,7 +1988,7 @@ if ($instalarGit) {
             $gitInstaller = "$env:TEMP\git-installer.exe"
             try {
                 Write-Step "Baixando Git Bash..."
-                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $gitInstaller -UseBasicParsing
+                $null = Invoke-FastDownload -Url $asset.browser_download_url -OutFile $gitInstaller -Label "Git Bash"
                 Write-Step "Instalando Git Bash (modo silencioso, /CURRENTUSER)..."
                 $installArgs = @(
                     "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-",
@@ -1668,6 +2035,7 @@ if ($instalarGit) {
 #    Sem winget    → orienta download manual
 # ============================================================
 if ($instalarClaudeDesk) {
+    Write-Phase "Claude Desktop"
 
     Write-Step "Verificando Claude Desktop..."
 
@@ -1707,8 +2075,7 @@ if ($instalarClaudeDesk) {
             try {
                 Write-Step "Baixando Claude Desktop..."
                 $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' }
-                Invoke-WebRequest -Uri "https://downloads.claude.ai/releases/win32/ClaudeSetup.exe" `
-                    -OutFile $setupPath -UseBasicParsing -Headers $headers -MaximumRedirection 10
+                $null = Invoke-FastDownload -Url "https://downloads.claude.ai/releases/win32/ClaudeSetup.exe" -OutFile $setupPath -Label "Claude Desktop"
                 # Valida que e um executavel (MZ header)
                 $bytes = [System.IO.File]::ReadAllBytes($setupPath)
                 if ($bytes[0] -eq 77 -and $bytes[1] -eq 90) {
@@ -1730,6 +2097,7 @@ if ($instalarClaudeDesk) {
 # 3. CLAUDE CODE (CLI) — irm https://claude.ai/install.ps1 | iex
 # ============================================================
 if ($instalarClaudeCLI) {
+    Write-Phase "Claude Code CLI"
 
     Write-Step "Verificando Claude Code (CLI)..."
 
@@ -1848,6 +2216,7 @@ if ($instalarClaudeCLI) {
 #    Sem winget    → orienta download manual (Microsoft Store)
 # ============================================================
 if ($instalarCodexDesk) {
+    Write-Phase "Codex Desktop"
 
     Write-Step "Verificando Codex Desktop (OpenAI)..."
 
@@ -1924,8 +2293,7 @@ if ($instalarCodexDesk) {
             try {
                 Write-Step "Baixando Codex Desktop..."
                 $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' }
-                Invoke-WebRequest -Uri "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi" `
-                    -OutFile $setupPath -UseBasicParsing -Headers $headers -MaximumRedirection 10
+                $null = Invoke-FastDownload -Url "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi" -OutFile $setupPath -Label "Codex Desktop"
                 # Valida que e um executavel (MZ header)
                 $bytes = [System.IO.File]::ReadAllBytes($setupPath)
                 if ($bytes[0] -eq 77 -and $bytes[1] -eq 90) {
@@ -1947,6 +2315,7 @@ if ($instalarCodexDesk) {
 # 4b. OPENCODE DESKTOP
 # ============================================================
 if ($instalarOpenDesk) {
+    Write-Phase "OpenCode Desktop"
 
     Write-Step "Verificando OpenCode Desktop..."
 
@@ -1996,30 +2365,19 @@ if ($instalarOpenDesk) {
 
 # ============================================================
 # 5. CODEX CLI (OpenAI) — npm i -g @openai/codex
+# (usa Invoke-NpmTool para passar --prefix/--cache explicitos e
+#  evitar dependencia de .npmrc do usuario que pode estar malformado)
 # ============================================================
 if ($instalarCodexCLI) {
-
-    Write-Step "Verificando Codex CLI..."
-
-    if (-not (Ensure-NodeJS -WingetOk $wingetOk)) {
-        Write-Warn "Nao foi possivel garantir o Node.js. Pulando Codex CLI."
-        Pause-Readable 3
-    } else {
-        try {
-            Write-Step "Instalando/atualizando Codex CLI..."
-            & npm install -g @openai/codex 2>&1 | ForEach-Object { Write-Host $_ }
-            Write-Ok "Codex CLI instalado/atualizado com sucesso."
-        } catch {
-            Write-Fail "Falha na instalacao do Codex CLI: $_"
-        }
-        Pause-Readable 3
-    }
+    Write-Phase "Codex CLI"
+    Invoke-NpmTool -Label "Codex CLI" -Cmd "codex" -Package "@openai/codex" -NpmName "@openai/codex"
 }
 
 # ============================================================
 # 6. OPENCODE   via npm
 # ============================================================
 if ($instalarOpenCode) {
+    Write-Phase "OpenCode (npm)"
     Invoke-NpmTool -Label "OpenCode" -Cmd "opencode" -Package "opencode-ai" -NpmName "opencode-ai"
 }
 
@@ -2126,47 +2484,72 @@ if ($algumaCLI) {
 }
 
 # ----------------------------------------------------------
-# VERIFICACAO FINAL
+# VERIFICACAO FINAL e RESUMO VISUAL
 # ----------------------------------------------------------
 $algumInstalado = $false
 
 if ($instalarGit -and $gitCmdExe -and (Test-Path $gitCmdExe)) {
-    try   { $v = & $gitCmdExe --version 2>&1; Write-Ok "Git Bash       : $v"; $algumInstalado = $true }
-    catch { Write-Warn "Git Bash nao detectado. Tente reabrir o terminal." }
+    try {
+        $v = (& $gitCmdExe --version 2>&1 | Out-String).Trim()
+        Add-InstallResult -Nome "Git Bash" -Status "OK" -Versao $v -Local $gitBashPath
+        $algumInstalado = $true
+    } catch {
+        Add-InstallResult -Nome "Git Bash" -Status "FALHOU" -Obs "nao respondeu --version"
+    }
+} elseif ($instalarGit) {
+    Add-InstallResult -Nome "Git Bash" -Status "FALHOU" -Obs "nao detectado"
 }
 
 if ($instalarClaudeCLI) {
-    try   { $v = & claude --version 2>&1; Write-Ok "Claude Code    : $(($v | Out-String).Trim())"; $algumInstalado = $true }
-    catch { Write-Warn "Claude Code nao detectado. Tente reabrir o terminal." }
+    try {
+        $v = (& claude --version 2>&1 | Out-String).Trim()
+        Add-InstallResult -Nome "Claude Code" -Status "OK" -Versao $v
+        $algumInstalado = $true
+    } catch {
+        Add-InstallResult -Nome "Claude Code" -Status "FALHOU" -Obs "reabra o terminal"
+    }
 }
 
 if ($instalarCodexCLI) {
-    try   { $v = & codex --version 2>&1; Write-Ok "Codex CLI      : $(($v | Out-String).Trim())"; $algumInstalado = $true }
-    catch { Write-Warn "Codex CLI nao detectado. Tente reabrir o terminal." }
+    try {
+        $v = (& codex --version 2>&1 | Out-String).Trim()
+        Add-InstallResult -Nome "Codex CLI" -Status "OK" -Versao $v
+        $algumInstalado = $true
+    } catch {
+        Add-InstallResult -Nome "Codex CLI" -Status "FALHOU" -Obs "reabra o terminal"
+    }
 }
 
 if ($instalarOpenCode) {
-    try   { $v = & opencode --version 2>&1; Write-Ok "OpenCode       : $(($v | Out-String).Trim())"; $algumInstalado = $true }
-    catch { Write-Warn "OpenCode nao detectado. Tente reabrir o terminal." }
+    try {
+        $v = (& opencode --version 2>&1 | Out-String).Trim()
+        Add-InstallResult -Nome "OpenCode" -Status "OK" -Versao $v
+        $algumInstalado = $true
+    } catch {
+        Add-InstallResult -Nome "OpenCode" -Status "FALHOU" -Obs "reabra o terminal"
+    }
 }
 
 if ($instalarClaudeDesk) {
     $pkg = Get-AppxPackage -Name "*Claude*" -ErrorAction SilentlyContinue
     if ($pkg) {
-        Write-Ok "Claude Desktop : instalado (versao $($pkg.Version))."
+        Add-InstallResult -Nome "Claude Desktop" -Status "OK" -Versao $pkg.Version
         $algumInstalado = $true
     } elseif ($wingetOk) {
-        Write-Warn "Claude Desktop : nao detectado. Tente pesquisar no Menu Iniciar ou reinstalar."
+        Add-InstallResult -Nome "Claude Desktop" -Status "FALHOU" -Obs "nao detectado"
+    } else {
+        Add-InstallResult -Nome "Claude Desktop" -Status "PULADO" -Obs "sem winget"
     }
-    # Sem winget: usuario ja foi orientado durante a instalacao
 }
 
 if ($instalarCodexDesk) {
     if ($codexDesktopOk) {
-        Write-Ok "Codex Desktop  : instalado com sucesso."
+        Add-InstallResult -Nome "Codex Desktop" -Status "OK"
         $algumInstalado = $true
     } elseif ($wingetOk) {
-        Write-Warn "Codex Desktop  : nao detectado. Tente pesquisar no Menu Iniciar ou reinstalar."
+        Add-InstallResult -Nome "Codex Desktop" -Status "FALHOU" -Obs "nao detectado"
+    } else {
+        Add-InstallResult -Nome "Codex Desktop" -Status "PULADO" -Obs "sem winget"
     }
 }
 
@@ -2174,30 +2557,33 @@ if ($instalarOpenDesk) {
     $openPkg = $null
     try { $openPkg = & winget list --id SST.OpenCodeDesktop 2>&1 | Out-String } catch { }
     if ($openPkg -match "SST.OpenCodeDesktop") {
-        Write-Ok "OpenCode Desktop: instalado com sucesso."
+        Add-InstallResult -Nome "OpenCode Desktop" -Status "OK"
         $algumInstalado = $true
     } elseif ($wingetOk) {
-        Write-Warn "OpenCode Desktop: nao detectado. Tente pesquisar no Menu Iniciar ou reinstalar."
+        Add-InstallResult -Nome "OpenCode Desktop" -Status "FALHOU" -Obs "nao detectado"
+    } else {
+        Add-InstallResult -Nome "OpenCode Desktop" -Status "PULADO" -Obs "sem winget"
     }
 }
 
-Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "  Concluido!" -ForegroundColor Green
+# --- Mostra o resumo visual ---
+Show-Summary
 
 $temCLI     = $instalarGit -or $instalarClaudeCLI -or $instalarCodexCLI -or $instalarOpenCode
 $temDesktop = $instalarClaudeDesk -or $instalarCodexDesk -or $instalarOpenDesk
 
 if ($algumInstalado) {
+    Write-Host ""
     if ($temCLI -and $temDesktop) {
-        Write-Host "  - CLI: Abra um novo terminal para usar os comandos." -ForegroundColor Green
-        Write-Host "  - Desktop: Pesquise os apps no Menu Iniciar." -ForegroundColor Green
+        Write-Ok   "CLI: abra um novo terminal para usar os comandos."
+        Write-Ok   "Desktop: pesquise os apps no Menu Iniciar."
     } elseif ($temCLI) {
-        Write-Host "  Abra um novo terminal para usar as ferramentas instaladas." -ForegroundColor Green
+        Write-Ok   "Abra um novo terminal para usar as ferramentas instaladas."
     } elseif ($temDesktop) {
-        Write-Host "  Pesquise os apps instalados no Menu Iniciar." -ForegroundColor Green
+        Write-Ok   "Pesquise os apps instalados no Menu Iniciar."
     }
+    Write-Host ""
 }
-Write-Host "============================================================`n" -ForegroundColor Cyan
 
 } catch {
     Write-Host "`n[ERR] Ocorreu um erro inesperado: $_" -ForegroundColor Red
@@ -2216,4 +2602,4 @@ if (-not (Confirm-Tecla "Voltar ao menu?")) {
     Write-Host "[ERR] Linha: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Red
     Write-Host ""
     Read-Host "Pressione ENTER para fechar"
-}
+}  
