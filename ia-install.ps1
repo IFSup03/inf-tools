@@ -1,11 +1,125 @@
+<#
+.SYNOPSIS
+    Instalador de ferramentas IA (Claude Code, Codex CLI, OpenCode, Desktops) para Windows.
+
+.DESCRIPTION
+    Script de instalacao/atualizacao/remocao das ferramentas de IA. Suporta:
+      - Modo interativo (menu) e nao-interativo (via switches)
+      - Maquina local, Servidor e Terminal Server (TS/UAC com outro usuario)
+      - PowerShell 5.1+ (Desktop e Core)
+      - Console UTF-8/VT com fallback ASCII
+      - Proxy do sistema, retry automatico em downloads
+      - Log estruturado via -LogPath
+
+.PARAMETER Tudo
+    Instala todas as ferramentas (CLI + Desktop). Equivale a opcao 1 do menu.
+
+.PARAMETER CLI
+    Instala somente as ferramentas CLI (Claude Code, Codex CLI, OpenCode).
+
+.PARAMETER Desktop
+    Instala somente os apps Desktop (Claude, Codex, OpenCode).
+
+.PARAMETER Pacotes
+    Lista especifica de pacotes a instalar. Valores aceitos:
+    Git, ClaudeCLI, CodexCLI, OpenCode, ClaudeDesk, CodexDesk, OpenDesk
+
+.PARAMETER Silent
+    Modo nao-interativo: sem prompts, sem ESPERAS, sem menu.
+    Usa logging estruturado se -LogPath for fornecido.
+
+.PARAMETER LogPath
+    Caminho do arquivo de log (transcript). Se nao informado em modo Silent,
+    grava em %TEMP%\ia-install_<timestamp>.log
+
+.PARAMETER SkipDiagnostico
+    Pula a etapa de diagnostico inicial (instala tudo sem checar versao atual).
+
+.EXAMPLE
+    .\ia-install.ps1
+    Abre o menu interativo.
+
+.EXAMPLE
+    .\ia-install.ps1 -Tudo -Silent -LogPath "C:\Logs\ia.log"
+    Instala todas as ferramentas em modo nao-interativo, gravando log.
+
+.EXAMPLE
+    .\ia-install.ps1 -Pacotes ClaudeCLI,CodexCLI -Silent
+    Instala somente Claude Code e Codex CLI sem prompts.
+
+.NOTES
+    Versao: 2.9.3
+    Compatibilidade: Windows 10/11, Server 2016+, PowerShell 5.1+
+#>
+[CmdletBinding(DefaultParameterSetName='Interactive', SupportsShouldProcess=$true)]
+param(
+    [Parameter(ParameterSetName='Tudo')]
+    [switch]$Tudo,
+
+    [Parameter(ParameterSetName='CLI')]
+    [switch]$CLI,
+
+    [Parameter(ParameterSetName='Desktop')]
+    [switch]$Desktop,
+
+    [Parameter(ParameterSetName='Pacotes')]
+    [ValidateSet('Git','ClaudeCLI','CodexCLI','OpenCode','ClaudeDesk','CodexDesk','OpenDesk')]
+    [string[]]$Pacotes,
+
+    # Quando combinado com -Pacotes ou -Tudo/-CLI/-Desktop, remove em vez de instalar
+    [switch]$Remover,
+
+    [switch]$Silent,
+
+    [string]$LogPath,
+
+    [switch]$SkipDiagnostico
+)
+
 $ErrorActionPreference = "Continue"
+
+# Modo nao-interativo? Detecta via switch ou ausencia de host interativo
+$script:NonInteractive = $Silent.IsPresent -or
+                         [Console]::IsInputRedirected -or
+                         (-not [Environment]::UserInteractive)
+
+# Inicia transcript se solicitado (ou auto em modo Silent)
+$script:TranscriptStarted = $false
+if ($LogPath -or ($Silent -and -not $LogPath)) {
+    if (-not $LogPath) {
+        $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $LogPath = Join-Path $env:TEMP "ia-install_$stamp.log"
+    }
+    try {
+        $logDir = Split-Path -Parent $LogPath
+        if ($logDir -and -not (Test-Path -LiteralPath $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+        Start-Transcript -Path $LogPath -Append -ErrorAction Stop | Out-Null
+        $script:TranscriptStarted = $true
+    } catch { Write-Warning "Nao foi possivel iniciar transcript em $LogPath : $_" }
+}
 
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.9.1"
+$SCRIPT_VERSION = "2.9.4"
 $SCRIPT_DATA    = "24/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.9.4"; Data = "24/04/2026"; Descricao = "Qualidade: testes Pester 5 em ia-install.Tests.ps1 cobrindo Repair-NpmRc e sintaxe" },
+    [PSCustomObject]@{ Versao = "2.9.4"; Data = "24/04/2026"; Descricao = "Qualidade: PSScriptAnalyzerSettings.psd1 com regras compativeis PS 5.1/7.4" },
+    [PSCustomObject]@{ Versao = "2.9.4"; Data = "24/04/2026"; Descricao = "Modernizacao: switch -Remover combinavel com -Tudo/-CLI/-Desktop/-Pacotes" },
+    [PSCustomObject]@{ Versao = "2.9.4"; Data = "24/04/2026"; Descricao = "Modernizacao: catalogo de pacotes em `$script:PACKAGES (foundation para futura externalizacao)" },
+    [PSCustomObject]@{ Versao = "2.9.3"; Data = "24/04/2026"; Descricao = "Modernizacao: param block + CmdletBinding, modo nao-interativo via -Silent, -Tudo, -CLI, -Desktop, -Pacotes" },
+    [PSCustomObject]@{ Versao = "2.9.3"; Data = "24/04/2026"; Descricao = "Modernizacao: log estruturado via -LogPath (Start-Transcript automatico em modo Silent)" },
+    [PSCustomObject]@{ Versao = "2.9.3"; Data = "24/04/2026"; Descricao = "Modernizacao: SupportsShouldProcess=true permite -WhatIf e -Confirm" },
+    [PSCustomObject]@{ Versao = "2.9.3"; Data = "24/04/2026"; Descricao = "Modernizacao: comment-based help completo (.SYNOPSIS, .EXAMPLE, .PARAMETER)" },
+    [PSCustomObject]@{ Versao = "2.9.3"; Data = "24/04/2026"; Descricao = "Modernizacao: verbos aprovados (Send-EnvChangeNotification, Wait-Readable) com aliases" },
+    [PSCustomObject]@{ Versao = "2.9.2"; Data = "24/04/2026"; Descricao = "Hardening: pre-flight detecta PS, .NET, HttpClient, CIM/WMI, Console UTF-8/VT/redirect, Proxy" },
+    [PSCustomObject]@{ Versao = "2.9.2"; Data = "24/04/2026"; Descricao = "Hardening: simbolos Unicode com fallback ASCII (+/X/!/>/i/*) em consoles sem UTF-8" },
+    [PSCustomObject]@{ Versao = "2.9.2"; Data = "24/04/2026"; Descricao = "Hardening: [Console]::Write protegido contra saida redirecionada (logs, pipes)" },
+    [PSCustomObject]@{ Versao = "2.9.2"; Data = "24/04/2026"; Descricao = "Hardening: download com retry+exponential backoff (2s/4s/8s) e proxy do sistema" },
+    [PSCustomObject]@{ Versao = "2.9.2"; Data = "24/04/2026"; Descricao = "Hardening: HttpClient indisponivel cai direto em Invoke-WebRequest (compat .NET antigo)" },
     [PSCustomObject]@{ Versao = "2.9.1"; Data = "24/04/2026"; Descricao = "Fix: Codex CLI agora usa Invoke-NpmTool (passa --prefix/--cache explicitos, evita ENOENT)" },
     [PSCustomObject]@{ Versao = "2.9.1"; Data = "24/04/2026"; Descricao = "Fix: Repair-NpmRc detecta e corrige .npmrc com linhas concatenadas (prefix=X\npmcache=Y)" },
     [PSCustomObject]@{ Versao = "2.9.1"; Data = "24/04/2026"; Descricao = "Fix: .npmrc gravado via System.IO.File + UTF8 sem BOM + CRLF explicito" },
@@ -67,6 +181,68 @@ $CHANGELOG = @(
     [PSCustomObject]@{ Versao = "1.0.0"; Data = "07/04/2026"; Descricao = "Suporte a Git Bash como pre-requisito do Claude Code" }
 )
 
+# ----------------------------------------------------------
+# CATALOGO DE PACOTES - metadados centralizados
+# (foundation para futura externalizacao em packages.json)
+# Cada entrada descreve uma ferramenta com seus identificadores
+# em diferentes gerenciadores. Use $script:PACKAGES['ClaudeCLI']
+# para acessar.
+# ----------------------------------------------------------
+$script:PACKAGES = @{
+    'Git' = @{
+        DisplayName  = 'Git Bash'
+        Type         = 'Installer'  # MSI/EXE direto
+        Cmd          = 'git'
+        WingetId     = 'Git.Git'
+        Url          = 'https://github.com/git-for-windows/git/releases/latest'
+        Required     = $true   # pre-requisito do Claude Code
+    }
+    'ClaudeCLI' = @{
+        DisplayName  = 'Claude Code'
+        Type         = 'Npm'
+        Cmd          = 'claude'
+        NpmName      = '@anthropic-ai/claude-code'
+        WingetId     = 'Anthropic.ClaudeCode'
+        Required     = $false
+    }
+    'CodexCLI' = @{
+        DisplayName  = 'Codex CLI'
+        Type         = 'Npm'
+        Cmd          = 'codex'
+        NpmName      = '@openai/codex'
+        WingetId     = $null
+        Required     = $false
+    }
+    'OpenCode' = @{
+        DisplayName  = 'OpenCode'
+        Type         = 'Npm'
+        Cmd          = 'opencode'
+        NpmName      = 'opencode-ai'
+        WingetId     = $null
+        Required     = $false
+    }
+    'ClaudeDesk' = @{
+        DisplayName  = 'Claude Desktop'
+        Type         = 'Appx'
+        AppxName     = '*Claude*'
+        WingetId     = 'Anthropic.Claude'
+        Required     = $false
+    }
+    'CodexDesk' = @{
+        DisplayName  = 'Codex Desktop'
+        Type         = 'AppxStore'
+        StoreId      = '9PLM9XGG6VKS'
+        AppxName     = '*Codex*'
+        Required     = $false
+    }
+    'OpenDesk' = @{
+        DisplayName  = 'OpenCode Desktop'
+        Type         = 'Winget'
+        WingetId     = 'SST.OpenCodeDesktop'
+        Required     = $false
+    }
+}
+
 # Garante que a janela nunca feche sozinha
 try {
 
@@ -94,19 +270,127 @@ try {
     [Win32.K32VT]::SetConsoleMode($handle, ($mode -bor 0x0004)) | Out-Null
 } catch { <# silencioso se nao suportado #> }
 
+# ----------------------------------------------------------
+# PRE-FLIGHT: detecta capacidades do ambiente
+# (PS, .NET, HttpClient, Console UTF-8/VT/redirect, Proxy, IsServer/TS)
+# Permite que o script funcione em qualquer computador, com fallbacks.
+# ----------------------------------------------------------
+$script:Compat = [PSCustomObject]@{
+    PSVersion       = $PSVersionTable.PSVersion
+    PSMajor         = $PSVersionTable.PSVersion.Major
+    PSEdition       = if ($PSVersionTable.PSEdition) { $PSVersionTable.PSEdition } else { "Desktop" }
+    DotNetVersion   = $null
+    HttpClient      = $false
+    CimAvail        = $false
+    WmiAvail        = $false
+    ConsoleUTF8     = $false
+    ConsoleVT       = $false
+    ConsoleRedir    = $false
+    UnicodeOk       = $false
+    HasProxy        = $false
+    ProxyAddress    = $null
+    IsServer        = $false
+    IsTerminalSrv   = $false
+    Is64bit         = [Environment]::Is64BitOperatingSystem
+    OsCaption       = $null
+}
+
+# .NET Framework version
+try {
+    $rel = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Name Release -ErrorAction Stop
+    $script:Compat.DotNetVersion = $rel.Release
+} catch { }
+
+# HttpClient (precisa de System.Net.Http.dll - normalmente .NET 4.5+)
+try {
+    Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+    $script:Compat.HttpClient = [bool]([type]"System.Net.Http.HttpClient")
+} catch { $script:Compat.HttpClient = $false }
+
+# CIM/WMI availability
+try { $null = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop; $script:Compat.CimAvail = $true } catch { }
+try { $null = Get-WmiObject Win32_OperatingSystem -ErrorAction Stop; $script:Compat.WmiAvail = $true } catch { }
+
+# Console: redirected, UTF-8, VT
+try { $script:Compat.ConsoleRedir = ([Console]::IsOutputRedirected -or [Console]::IsErrorRedirected) } catch { }
+try { $script:Compat.ConsoleUTF8  = ([Console]::OutputEncoding.WebName -match 'utf-?8') } catch { }
+try {
+    if (-not $script:Compat.ConsoleRedir) {
+        # Probe VT support: se o GetConsoleMode setou 0x0004 com sucesso anteriormente, o terminal aceita VT
+        $h = [Win32.K32VT]::GetStdHandle(-11)
+        $m = 0
+        if ([Win32.K32VT]::GetConsoleMode($h, [ref]$m)) {
+            $script:Compat.ConsoleVT = (($m -band 0x0004) -ne 0)
+        }
+    }
+} catch { }
+
+# Unicode rendering: usar simbolos Unicode somente se console for UTF-8 E nao redirecionado
+$script:Compat.UnicodeOk = ($script:Compat.ConsoleUTF8 -and (-not $script:Compat.ConsoleRedir))
+
+# Proxy (sistema)
+try {
+    $proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+    $testUri = [Uri]"https://registry.npmjs.org"
+    $resolved = $proxy.GetProxy($testUri)
+    if ($resolved -and $resolved.AbsoluteUri -ne $testUri.AbsoluteUri) {
+        $script:Compat.HasProxy = $true
+        $script:Compat.ProxyAddress = $resolved.AbsoluteUri
+    }
+} catch { }
+
+# OS type: Server vs Workstation, Terminal Services
+try {
+    if ($script:Compat.CimAvail) {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    } elseif ($script:Compat.WmiAvail) {
+        $os = Get-WmiObject Win32_OperatingSystem -ErrorAction Stop
+    }
+    if ($os) {
+        $script:Compat.OsCaption = $os.Caption
+        # ProductType: 1=Workstation, 2=DC, 3=Server
+        $script:Compat.IsServer = ($os.ProductType -ne 1)
+    }
+} catch { }
+try {
+    # Terminal Services session: SESSIONNAME comeca com RDP-Tcp ou nao e Console
+    if ($env:SESSIONNAME -and ($env:SESSIONNAME -ne "Console")) {
+        $script:Compat.IsTerminalSrv = $true
+    }
+} catch { }
+
+# --- Wrapper seguro para [Console]::Write (evita erro quando saida e redirecionada) ---
+function Write-ConsoleSafe {
+    param([string]$Text)
+    if ($script:Compat.ConsoleRedir) {
+        try { [Console]::Out.Write($Text) } catch { Write-Host $Text -NoNewline }
+    } else {
+        try { [Console]::Write($Text) } catch { Write-Host $Text -NoNewline }
+    }
+}
+
 # --- Cores para output (visual dashboard) ---
 $script:PhaseCurrent    = 0
 $script:PhaseTotal      = 0
 $script:ScriptStartTime = $null
 $script:InstallResults  = @()  # resumo final
 
-# Caracteres (UTF-8): simbolos e box-drawing
-$script:SymOk    = [char]0x2713   # ✓
-$script:SymFail  = [char]0x2717   # ✗
-$script:SymWarn  = [char]0x26A0   # ⚠
-$script:SymStep  = [char]0x25B6   # ▶
-$script:SymInfo  = [char]0x2139   # ℹ
-$script:SymBullet= [char]0x2022   # •
+# Caracteres: usa Unicode quando suportado, ASCII como fallback (Windows 7/CMD legado/PS sem UTF-8)
+if ($script:Compat.UnicodeOk) {
+    $script:SymOk     = [char]0x2713  # ✓
+    $script:SymFail   = [char]0x2717  # ✗
+    $script:SymWarn   = [char]0x26A0  # ⚠
+    $script:SymStep   = [char]0x25B6  # ▶
+    $script:SymInfo   = [char]0x2139  # ℹ
+    $script:SymBullet = [char]0x2022  # •
+} else {
+    $script:SymOk     = '+'
+    $script:SymFail   = 'X'
+    $script:SymWarn   = '!'
+    $script:SymStep   = '>'
+    $script:SymInfo   = 'i'
+    $script:SymBullet = '*'
+}
 
 function Start-Dashboard {
     param([int]$TotalPhases = 0)
@@ -169,11 +453,18 @@ function Show-Spinner {
     while ($job.State -eq 'Running' -and (Get-Date) -lt $deadline) {
         $c = $chars[$i % $chars.Length]
         $line = "  $c  $Message"
-        [Console]::Write("`r" + $line.PadRight(80))
+        if (-not $script:Compat.ConsoleRedir) {
+            try { [Console]::Write("`r" + $line.PadRight(80)) } catch { Write-Host $line }
+        } else {
+            # Em saida redirecionada, imprime so a primeira vez para nao poluir log
+            if ($i -eq 0) { Write-Host $line }
+        }
         Start-Sleep -Milliseconds 120
         $i++
     }
-    [Console]::Write("`r" + (" " * 80) + "`r")
+    if (-not $script:Compat.ConsoleRedir) {
+        try { [Console]::Write("`r" + (" " * 80) + "`r") } catch { }
+    }
     if ($job.State -eq 'Running') {
         Stop-Job $job -ErrorAction SilentlyContinue
         Remove-Job $job -Force -ErrorAction SilentlyContinue
@@ -244,8 +535,12 @@ function Invoke-FastDownload {
         [string]$Label = "",
         [int]$BufferSize = 1048576,
         [int]$TimeoutSec = 600,
+        [int]$MaxRetries = 3,
         [switch]$Silent
     )
+
+    # Se HttpClient nao esta disponivel, marca para usar fallback IWR direto
+    $usarFallbackDireto = (-not $script:Compat.HttpClient)
 
     # Garante TLS moderno (importante para GitHub/Microsoft)
     try {
@@ -272,10 +567,24 @@ function Invoke-FastDownload {
     $targetStream = $null
     $ok = $false
 
+    if ($usarFallbackDireto) {
+        if (-not $Silent) { Write-Info "HttpClient indisponivel; usando Invoke-WebRequest." }
+        # Pula bloco HttpClient inteiro: cai para fallback abaixo
+    } else {
+
     try {
         $handler = New-Object System.Net.Http.HttpClientHandler
         $handler.AllowAutoRedirect = $true
         try { $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate } catch { }
+
+        # Proxy do sistema (corporativo) se detectado
+        if ($script:Compat.HasProxy) {
+            try {
+                $handler.UseProxy = $true
+                $handler.Proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+                try { $handler.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials } catch { }
+            } catch { }
+        }
 
         $client = New-Object System.Net.Http.HttpClient($handler)
         $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
@@ -333,7 +642,9 @@ function Invoke-FastDownload {
                         $line = ("  Recebido: {0,8:N2} MB | {1,5:N1} MB/s | {2,6:N1}s" -f $recMB, $speedMBs, $elapsedSec)
                     }
 
-                    try { [Console]::Write("`r" + $line.PadRight(90)) } catch { }
+                    if (-not $script:Compat.ConsoleRedir) {
+                        try { [Console]::Write("`r" + $line.PadRight(90)) } catch { }
+                    }
                     $lastUpdate = $now
                 }
             }
@@ -346,14 +657,18 @@ function Invoke-FastDownload {
             if ($elapsedFinal -lt 0.001) { $elapsedFinal = 0.001 }
             $finalMB    = [math]::Round($totalRead / 1MB, 2)
             $finalSpeed = ($totalRead / $elapsedFinal) / 1MB
-            try { [Console]::Write("`r" + (" " * 90) + "`r") } catch { }
+            if (-not $script:Compat.ConsoleRedir) {
+                try { [Console]::Write("`r" + (" " * 90) + "`r") } catch { }
+            }
             Write-Host ("  {0} Download concluido: {1:N2} MB em {2:N1}s ({3:N1} MB/s)" -f $script:SymOk, $finalMB, $elapsedFinal, $finalSpeed) -ForegroundColor Green
         }
         $ok = $true
     }
     catch {
         if (-not $Silent) {
-            try { [Console]::Write("`r" + (" " * 90) + "`r") } catch { }
+            if (-not $script:Compat.ConsoleRedir) {
+                try { [Console]::Write("`r" + (" " * 90) + "`r") } catch { }
+            }
             Write-Warn "Download rapido falhou: $($_.Exception.Message)"
             Write-Info "Tentando fallback via Invoke-WebRequest..."
         }
@@ -367,16 +682,32 @@ function Invoke-FastDownload {
         $ProgressPreference = $oldProgress
     }
 
+    } # fim do bloco HttpClient (else de $usarFallbackDireto)
+
     if (-not $ok) {
-        # Fallback: Invoke-WebRequest com progresso silenciado (ainda 5x mais rapido que o default)
-        try {
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
-            if (-not $Silent) { Write-Ok "Download concluido via fallback." }
-            $ok = $true
-        } catch {
-            if (-not $Silent) { Write-Fail "Falha no download: $($_.Exception.Message)" }
-            $ok = $false
+        # Fallback com retry e exponential backoff
+        $ProgressPreference = 'SilentlyContinue'
+        for ($tentativa = 1; $tentativa -le $MaxRetries; $tentativa++) {
+            try {
+                if ($script:Compat.HasProxy) {
+                    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing `
+                        -Proxy $script:Compat.ProxyAddress -ProxyUseDefaultCredentials -ErrorAction Stop
+                } else {
+                    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
+                }
+                if (-not $Silent) { Write-Ok "Download concluido via fallback." }
+                $ok = $true
+                break
+            } catch {
+                if ($tentativa -lt $MaxRetries) {
+                    $espera = [Math]::Pow(2, $tentativa)  # 2s, 4s, 8s
+                    if (-not $Silent) { Write-Warn "Tentativa $tentativa falhou. Aguardando $espera s..." }
+                    Start-Sleep -Seconds $espera
+                } else {
+                    if (-not $Silent) { Write-Fail "Falha no download apos $MaxRetries tentativas: $($_.Exception.Message)" }
+                    $ok = $false
+                }
+            }
         }
         $ProgressPreference = $oldProgress
     }
@@ -384,13 +715,38 @@ function Invoke-FastDownload {
     return $ok
 }
 
-# --- Pausa legivel entre etapas (segundos) ---
-function Pause-Readable { param([int]$Seconds = 3) Start-Sleep -Seconds $Seconds }
+<#
+.SYNOPSIS
+    Pausa entre etapas para leitura humana. No-op em modo nao-interativo.
+.PARAMETER Seconds
+    Segundos a aguardar (default 3).
+#>
+function Wait-Readable {
+    param([int]$Seconds = 3)
+    if ($script:NonInteractive) { return }
+    Start-Sleep -Seconds $Seconds
+}
+# Alias retrocompat
+Set-Alias -Name Pause-Readable -Value Wait-Readable -Scope Script -ErrorAction SilentlyContinue
 
-# --- Confirmacao por tecla: ENTER = sim, ESC = nao ---
-# Retorna $true para ENTER, $false para ESC
+<#
+.SYNOPSIS
+    Confirmacao por tecla. ENTER=sim, ESC=nao. Em modo Silent retorna $true automaticamente.
+.PARAMETER Mensagem
+    Texto do prompt.
+.OUTPUTS
+    [bool] $true para confirmar, $false para cancelar.
+#>
 function Confirm-Tecla {
+    [CmdletBinding()]
     param([string]$Mensagem)
+
+    # Modo nao-interativo: assume sim
+    if ($script:NonInteractive) {
+        Write-Verbose "[NonInteractive] Auto-confirmando: $Mensagem"
+        return $true
+    }
+
     Write-Host "  $Mensagem [ENTER = sim | ESC = nao] " -ForegroundColor White -NoNewline
     while ($true) {
         $key = [Console]::ReadKey($true)
@@ -425,9 +781,26 @@ function Test-AVXSupport {
 # ----------------------------------------------------------
 $script:UsuarioReal = $null
 
+<#
+.SYNOPSIS
+    Retorna dados do usuario interativo real (dono da sessao do explorer.exe).
+.DESCRIPTION
+    Em cenario UAC com outro usuario (TS: usuario comum roda o script e UAC
+    sobe a janela como admif), o $env:USERNAME e o admin elevado. Esta funcao
+    detecta o REAL usuario via WMI Win32_Process.GetOwner() do explorer.exe
+    e retorna SID, perfil, AppData, etc. Resultado e cacheado em $script:UsuarioReal.
+.OUTPUTS
+    PSCustomObject com:
+      Username, Domain, Sid, UserProfile, AppData, LocalAppData,
+      ElevadoComOutroUsr (bool: indica se UAC foi com outra conta)
+.EXAMPLE
+    $u = Get-UsuarioInterativo
+    if ($u.ElevadoComOutroUsr) { Write-Warn "UAC com outro usuario detectado" }
+#>
 function Get-UsuarioInterativo {
-    # Retorna hashtable com dados do usuario interativo logado.
-    # Usa cache ($script:UsuarioReal) para nao repetir a query.
+    [CmdletBinding()]
+    param()
+    # Usa cache ($script:UsuarioReal) para nao repetir a query
     if ($null -ne $script:UsuarioReal) { return $script:UsuarioReal }
 
     # Valores padrao: usuario atual (processo em execucao)
@@ -498,14 +871,31 @@ function Get-UsuarioInterativo {
     return $info
 }
 
-# --- Grava variavel de ambiente no hive do usuario real ---
-# Em cenario UAC-com-outra-conta, escreve em HKU:\<SID>\Environment
-# do usuario interativo, nao no ramo do admin elevado.
+<#
+.SYNOPSIS
+    Grava uma variavel de ambiente no hive do usuario real (UAC-aware).
+.DESCRIPTION
+    Em cenario UAC com outra conta, escreve em HKU:\<SID>\Environment do usuario
+    interativo (dono do explorer.exe), nao no ramo do admin elevado. Carrega o
+    NTUSER.DAT do usuario via reg load se necessario.
+.PARAMETER Name
+    Nome da variavel (ex.: "Path", "CLAUDE_CODE_GIT_BASH_PATH").
+.PARAMETER Value
+    Valor a gravar.
+.PARAMETER Append
+    Se especificado, concatena ao valor existente usando ";" como separador
+    e evita duplicar entradas iguais.
+.EXAMPLE
+    Set-UserEnvVar -Name "Path" -Value "$env:USERPROFILE\.local\bin" -Append
+.OUTPUTS
+    [bool] $true se gravou com sucesso.
+#>
 function Set-UserEnvVar {
+    [CmdletBinding(SupportsShouldProcess=$true)]
     param(
         [Parameter(Mandatory)][string]$Name,
         [string]$Value,
-        [switch]$Append  # se setado, concatena ao valor existente com separador ;
+        [switch]$Append
     )
     $u = Get-UsuarioInterativo
 
@@ -610,8 +1000,18 @@ function Get-UserEnvVar {
     }
 }
 
-# --- Dispara WM_SETTINGCHANGE para avisar Explorer sobre mudancas em env ---
-function Broadcast-EnvChange {
+<#
+.SYNOPSIS
+    Dispara WM_SETTINGCHANGE para o Explorer e processos abertos verem mudancas em variaveis de ambiente.
+.DESCRIPTION
+    Sem esse broadcast, novos terminais ainda enxergam o PATH antigo ate o usuario fazer logoff/logon.
+    Usa SendMessageTimeout via P/Invoke (user32.dll) para nao travar caso algum processo nao responda.
+.EXAMPLE
+    Send-EnvChangeNotification
+#>
+function Send-EnvChangeNotification {
+    [CmdletBinding()]
+    param()
     try {
         if (-not ("NativeMethods" -as [type])) {
             Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
@@ -627,6 +1027,8 @@ function Broadcast-EnvChange {
         [void][Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [System.UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result)
     } catch { }
 }
+# Alias retrocompat (verbo nao aprovado, mas mantido para nao quebrar referencias internas)
+Set-Alias -Name Broadcast-EnvChange -Value Send-EnvChangeNotification -Scope Script -ErrorAction SilentlyContinue
 
 # --- Deteccao confiavel de npm (PS 5.1 compativel) ---
 # Usa Get-Command (nao depende de $ErrorActionPreference=Stop)
@@ -823,15 +1225,36 @@ function Test-And-Fix-Path {
     return $problemas.Count -eq 0
 }
 
-# --- Repara .npmrc corrompido e define prefix/cache corretos ---
-# Detecta linhas malformadas tipo "prefix=X\npmcache=Y" (bug observado em TS/UAC onde
-# Set-Content concatenou valores) e reescreve com CRLF + UTF8 sem BOM.
+<#
+.SYNOPSIS
+    Repara um arquivo .npmrc corrompido e define prefix/cache corretos.
+.DESCRIPTION
+    Detecta linhas malformadas tipo "prefix=X\npmcache=Y" (resultado de Set-Content
+    em PowerShell concatenando valores em uma unica linha sem CRLF). Quebra essas
+    linhas, remove duplicatas de prefix/cache e regrava o arquivo via System.IO.File
+    com UTF-8 sem BOM e CRLF explicito (evita que npm interprete mal o arquivo).
+.PARAMETER Path
+    Caminho do arquivo .npmrc (geralmente $env:USERPROFILE\.npmrc).
+.PARAMETER Prefix
+    Diretorio onde npm instala pacotes globais (geralmente $env:APPDATA\npm).
+.PARAMETER Cache
+    Diretorio do cache do npm (geralmente $env:APPDATA\npm-cache).
+.OUTPUTS
+    [bool] $true se gravou com sucesso, $false caso contrario.
+.EXAMPLE
+    Repair-NpmRc -Path "$env:USERPROFILE\.npmrc" -Prefix "$env:APPDATA\npm" -Cache "$env:APPDATA\npm-cache"
+#>
 function Repair-NpmRc {
+    [CmdletBinding(SupportsShouldProcess=$true)]
     param(
-        [string]$Path,
-        [string]$Prefix,
-        [string]$Cache
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Prefix,
+        [Parameter(Mandatory=$true)][string]$Cache
     )
+
+    if (-not $PSCmdlet.ShouldProcess($Path, "Reparar .npmrc com prefix=$Prefix cache=$Cache")) {
+        return $false
+    }
 
     try {
         $linhas = New-Object System.Collections.Generic.List[string]
@@ -1214,35 +1637,44 @@ function Invoke-Diagnostico {
 
 # ----------------------------------------------------------
 # LOOP PRINCIPAL - menu principal: Instalar ou Remover
+# Em modo nao-interativo (param block) executa apenas uma vez como Instalar
 # ----------------------------------------------------------
 do {
-Clear-Host
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "   Gerenciador de Ferramentas Dev" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  O que deseja fazer?" -ForegroundColor White
-Write-Host ""
-Write-Host "  [1] Instalar / Atualizar ferramentas" -ForegroundColor Yellow
-Write-Host "  [2] Remover ferramentas" -ForegroundColor Yellow
-Write-Host "  [9] Versao e historico de atualizacoes" -ForegroundColor DarkGray
-Write-Host "  [0] Sair" -ForegroundColor Yellow
-Write-Host ""
 
-$modoPrincipal = $null
-while ($modoPrincipal -notin @('0','1','2','9')) {
-    Write-Host "  Digite o numero da opcao: " -ForegroundColor White -NoNewline
-    $key = [Console]::ReadKey($true)
-    $modoPrincipal = $key.KeyChar.ToString()
-    Write-Host $modoPrincipal
-    if ($modoPrincipal -notin @('0','1','2','9')) {
-        Write-Host "  Opcao invalida. Tente novamente." -ForegroundColor Red
+if ($Tudo -or $CLI -or $Desktop -or $Pacotes) {
+    # Modo nao-interativo: pula menu principal
+    $modoPrincipal = if ($Remover) { '2' } else { '1' }
+    $acaoLabel     = if ($Remover) { 'Remover' } else { 'Instalar' }
+    Write-Verbose "[NonInteractive] Modo principal automatico: $acaoLabel"
+} else {
+    Clear-Host
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "   Gerenciador de Ferramentas Dev" -ForegroundColor Cyan
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  O que deseja fazer?" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [1] Instalar / Atualizar ferramentas" -ForegroundColor Yellow
+    Write-Host "  [2] Remover ferramentas" -ForegroundColor Yellow
+    Write-Host "  [9] Versao e historico de atualizacoes" -ForegroundColor DarkGray
+    Write-Host "  [0] Sair" -ForegroundColor Yellow
+    Write-Host ""
+
+    $modoPrincipal = $null
+    while ($modoPrincipal -notin @('0','1','2','9')) {
+        Write-Host "  Digite o numero da opcao: " -ForegroundColor White -NoNewline
+        $key = [Console]::ReadKey($true)
+        $modoPrincipal = $key.KeyChar.ToString()
+        Write-Host $modoPrincipal
+        if ($modoPrincipal -notin @('0','1','2','9')) {
+            Write-Host "  Opcao invalida. Tente novamente." -ForegroundColor Red
+        }
     }
-}
 
-if ($modoPrincipal -eq '0') {
-    Write-Host "`nSaindo..." -ForegroundColor Gray
-    break
+    if ($modoPrincipal -eq '0') {
+        Write-Host "`nSaindo..." -ForegroundColor Gray
+        break
+    }
 }
 
 # ── MODO VERSAO ───────────────────────────────────────────────
@@ -1305,25 +1737,52 @@ if ($modoPrincipal -eq '2') {
     Write-Host "  [0] Voltar" -ForegroundColor Yellow
     Write-Host ""
 
-    $opcaoRem = $null
-    while ($opcaoRem -notin @('0','1','2','3','4','5','6','7','8','9')) {
-        Write-Host "  Digite o numero da opcao: " -ForegroundColor White -NoNewline
-        $key = [Console]::ReadKey($true)
-        $opcaoRem = $key.KeyChar.ToString()
-        Write-Host $opcaoRem
-        if ($opcaoRem -notin @('0','1','2','3','4','5','6','7','8','9')) {
-            Write-Host "  Opcao invalida. Tente novamente." -ForegroundColor Red
+    # Modo nao-interativo: resolve a partir dos parametros
+    if ($Remover -and ($Tudo -or $CLI -or $Desktop -or $Pacotes)) {
+        $remClaudeCLI = $remCodexCLI = $remOpenCode = $false
+        $remClaudeDesk = $remCodexDesk = $remOpenDesk = $false
+
+        if ($Tudo) {
+            $remClaudeCLI = $remCodexCLI = $remOpenCode = $true
+            $remClaudeDesk = $remCodexDesk = $remOpenDesk = $true
+            $opcaoRem = '1'
+        } elseif ($CLI) {
+            $remClaudeCLI = $remCodexCLI = $remOpenCode = $true
+            $opcaoRem = '5'
+        } elseif ($Desktop) {
+            $remClaudeDesk = $remCodexDesk = $remOpenDesk = $true
+            $opcaoRem = '9'
+        } elseif ($Pacotes) {
+            if ($Pacotes -contains 'ClaudeCLI')  { $remClaudeCLI  = $true }
+            if ($Pacotes -contains 'CodexCLI')   { $remCodexCLI   = $true }
+            if ($Pacotes -contains 'OpenCode')   { $remOpenCode   = $true }
+            if ($Pacotes -contains 'ClaudeDesk') { $remClaudeDesk = $true }
+            if ($Pacotes -contains 'CodexDesk')  { $remCodexDesk  = $true }
+            if ($Pacotes -contains 'OpenDesk')   { $remOpenDesk   = $true }
+            $opcaoRem = 'P'
         }
+        Write-Host "  [NonInteractive] Selecao para remocao via parametros: $opcaoRem" -ForegroundColor Gray
+    } else {
+        $opcaoRem = $null
+        while ($opcaoRem -notin @('0','1','2','3','4','5','6','7','8','9')) {
+            Write-Host "  Digite o numero da opcao: " -ForegroundColor White -NoNewline
+            $key = [Console]::ReadKey($true)
+            $opcaoRem = $key.KeyChar.ToString()
+            Write-Host $opcaoRem
+            if ($opcaoRem -notin @('0','1','2','3','4','5','6','7','8','9')) {
+                Write-Host "  Opcao invalida. Tente novamente." -ForegroundColor Red
+            }
+        }
+
+        if ($opcaoRem -eq '0') { continue }
+
+        $remClaudeCLI  = $opcaoRem -in @('1','2','5')
+        $remCodexCLI   = $opcaoRem -in @('1','3','5')
+        $remOpenCode   = $opcaoRem -in @('1','4','5')
+        $remClaudeDesk = $opcaoRem -in @('1','6','9')
+        $remCodexDesk  = $opcaoRem -in @('1','7','9')
+        $remOpenDesk   = $opcaoRem -in @('1','8','9')
     }
-
-    if ($opcaoRem -eq '0') { continue }
-
-    $remClaudeCLI  = $opcaoRem -in @('1','2','5')
-    $remCodexCLI   = $opcaoRem -in @('1','3','5')
-    $remOpenCode   = $opcaoRem -in @('1','4','5')
-    $remClaudeDesk = $opcaoRem -in @('1','6','9')
-    $remCodexDesk  = $opcaoRem -in @('1','7','9')
-    $remOpenDesk   = $opcaoRem -in @('1','8','9')
 
     Write-Host ""
     Write-Host "  Itens que serao removidos:" -ForegroundColor White
@@ -1640,27 +2099,60 @@ Write-Host ""
 Write-Host "  [0] Voltar" -ForegroundColor Yellow
 Write-Host ""
 
-$opcao = $null
-while ($opcao -notin @('0','1','2','3','4','5','6','7','8','9')) {
-    Write-Host "  Digite o numero da opcao: " -ForegroundColor White -NoNewline
-    $key = [Console]::ReadKey($true)
-    $opcao = $key.KeyChar.ToString()
-    Write-Host $opcao
-    if ($opcao -notin @('0','1','2','3','4','5','6','7','8','9')) {
-        Write-Host "  Opcao invalida. Tente novamente." -ForegroundColor Red
-    }
-}
-
-if ($opcao -eq '0') { continue }
-
-$instalarGit        = $opcao -in @('1','2','5')
-$instalarClaudeCLI  = $opcao -in @('1','2','5')
-$instalarCodexCLI   = $opcao -in @('1','3','5')
-$instalarOpenCode   = $opcao -in @('1','4','5')
-$instalarClaudeDesk = $opcao -in @('1','6','9')
-$instalarCodexDesk  = $opcao -in @('1','7','9')
-$instalarOpenDesk   = $opcao -in @('1','8','9')
+# --- Resolucao da opcao via parametros (modo nao-interativo) ou prompt (interativo) ---
+$instalarGit        = $false
+$instalarClaudeCLI  = $false
+$instalarCodexCLI   = $false
+$instalarOpenCode   = $false
+$instalarClaudeDesk = $false
+$instalarCodexDesk  = $false
+$instalarOpenDesk   = $false
 $codexDesktopOk     = $false
+
+if ($Tudo -or $CLI -or $Desktop -or $Pacotes) {
+    if ($Tudo) {
+        $instalarGit = $instalarClaudeCLI = $instalarCodexCLI = $instalarOpenCode = $true
+        $instalarClaudeDesk = $instalarCodexDesk = $instalarOpenDesk = $true
+        $opcao = '1'
+    } elseif ($CLI) {
+        $instalarGit = $instalarClaudeCLI = $instalarCodexCLI = $instalarOpenCode = $true
+        $opcao = '5'
+    } elseif ($Desktop) {
+        $instalarClaudeDesk = $instalarCodexDesk = $instalarOpenDesk = $true
+        $opcao = '9'
+    } elseif ($Pacotes) {
+        if ($Pacotes -contains 'Git')        { $instalarGit        = $true }
+        if ($Pacotes -contains 'ClaudeCLI')  { $instalarClaudeCLI  = $true; $instalarGit = $true }
+        if ($Pacotes -contains 'CodexCLI')   { $instalarCodexCLI   = $true }
+        if ($Pacotes -contains 'OpenCode')   { $instalarOpenCode   = $true }
+        if ($Pacotes -contains 'ClaudeDesk') { $instalarClaudeDesk = $true }
+        if ($Pacotes -contains 'CodexDesk')  { $instalarCodexDesk  = $true }
+        if ($Pacotes -contains 'OpenDesk')   { $instalarOpenDesk   = $true }
+        $opcao = 'P'
+    }
+    Write-Host "  [NonInteractive] Selecao via parametros: $opcao" -ForegroundColor Gray
+} else {
+    $opcao = $null
+    while ($opcao -notin @('0','1','2','3','4','5','6','7','8','9')) {
+        Write-Host "  Digite o numero da opcao: " -ForegroundColor White -NoNewline
+        $key = [Console]::ReadKey($true)
+        $opcao = $key.KeyChar.ToString()
+        Write-Host $opcao
+        if ($opcao -notin @('0','1','2','3','4','5','6','7','8','9')) {
+            Write-Host "  Opcao invalida. Tente novamente." -ForegroundColor Red
+        }
+    }
+
+    if ($opcao -eq '0') { continue }
+
+    $instalarGit        = $opcao -in @('1','2','5')
+    $instalarClaudeCLI  = $opcao -in @('1','2','5')
+    $instalarCodexCLI   = $opcao -in @('1','3','5')
+    $instalarOpenCode   = $opcao -in @('1','4','5')
+    $instalarClaudeDesk = $opcao -in @('1','6','9')
+    $instalarCodexDesk  = $opcao -in @('1','7','9')
+    $instalarOpenDesk   = $opcao -in @('1','8','9')
+}
 
 Write-Host ""
 Write-Host "  Itens selecionados:" -ForegroundColor White
@@ -2595,11 +3087,19 @@ if (-not (Confirm-Tecla "Voltar ao menu?")) {
     break
 }
 
-} while ($true)
+# Em modo nao-interativo executa o loop apenas uma vez
+} while (-not $script:NonInteractive -and -not ($Tudo -or $CLI -or $Desktop -or $Pacotes))
 
 } catch {
     Write-Host "`n[ERR] Erro fatal: $_" -ForegroundColor Red
     Write-Host "[ERR] Linha: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Red
     Write-Host ""
-    Read-Host "Pressione ENTER para fechar"
-}  
+    if (-not $script:NonInteractive) {
+        Read-Host "Pressione ENTER para fechar"
+    }
+} finally {
+    if ($script:TranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+}
+  
