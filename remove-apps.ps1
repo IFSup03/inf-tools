@@ -82,9 +82,14 @@ $ErrorActionPreference = "Continue"
 # ----------------------------------------------------------
 # Versao e historico
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.0.0"
+$SCRIPT_VERSION = "2.0.1"
 $SCRIPT_DATA    = "28/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: auto-elevacao preserva arrays como -Apps Xbox Cortana em vez de string unica" },
+    [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: escrita de DWORD no Registry usa New-ItemProperty -PropertyType DWord em vez de Set-ItemProperty -Type" },
+    [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: funcao interna Remove-AppPackage renomeada para Invoke-AppPackageRemoval para evitar colisao com cmdlets/modulos externos" },
+    [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: $script:APPS renomeado para $script:AppsCatalog (colisao com parametro -Apps)" },
+    [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: SymShield usa ConvertFromUtf32 (codepoint 0x1F6E1 esta fora do BMP)" },
     [PSCustomObject]@{ Versao = "2.0.0"; Data = "28/04/2026"; Descricao = "Reescrita: param block + CmdletBinding, modo nao-interativo via -Apps/-Tudo/-Silent" },
     [PSCustomObject]@{ Versao = "2.0.0"; Data = "28/04/2026"; Descricao = "Novo: catalogo expandido com apps consumer (Spotify, TikTok, Disney, MSTeams, Clipchamp, etc)" },
     [PSCustomObject]@{ Versao = "2.0.0"; Data = "28/04/2026"; Descricao = "Seguranca: lista de apps protegidos impede remocao acidental de componentes do sistema" },
@@ -127,7 +132,7 @@ if ($LogPath -or ($Silent -and -not $LogPath)) {
 # CATALOGO DE APPS - cada categoria mapeia para identificadores Appx
 # Inclui apps modernos (consumer, MSTeams personal, etc) que o original nao cobria
 # ----------------------------------------------------------
-$script:APPS = [ordered]@{
+$script:AppsCatalog = [ordered]@{
     'Xbox' = [PSCustomObject]@{
         Display = 'Xbox (Game Bar, Console Companion, Identidade, Gaming Overlay)'
         Apps = @(
@@ -376,7 +381,9 @@ if ($script:Compat.UnicodeOk) {
     $script:SymInfo   = [char]0x2139  # ℹ
     $script:SymBullet = [char]0x2022  # •
     $script:SymTrash  = [char]0x2716  # ✖
-    $script:SymShield = [char]0x1F6E1 # 🛡
+    # 🛡 (U+1F6E1) esta fora do BMP, [char] e UTF-16 16-bit so suporta <= 0xFFFF.
+    # ConvertFromUtf32 devolve a surrogate pair correta como string.
+    $script:SymShield = [Char]::ConvertFromUtf32(0x1F6E1)
     $script:BoxTL     = [char]0x256D
     $script:BoxTR     = [char]0x256E
     $script:BoxBL     = [char]0x2570
@@ -556,39 +563,107 @@ function Test-IsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+<#
+.SYNOPSIS
+    Reexecuta o script com privilegios elevados, preservando o visual moderno
+    (Windows Terminal preto) sempre que possivel.
+.DESCRIPTION
+    Estrategia em ordem de preferencia:
+      1. wt.exe (Windows Terminal) com -Verb RunAs   -> mantem tela preta moderna
+      2. pwsh.exe (PowerShell 7+) com BG forcado     -> tema escuro
+      3. powershell.exe legacy com BG forcado        -> conhost com fundo preto (em vez do azul)
+    Em modo Silent ignora wt.exe (precisa de exit code limpo) e usa powershell.exe direto.
+#>
 function Request-Elevation {
     Write-Host "  $($script:SymWarn) Este script requer privilegios administrativos." -ForegroundColor Yellow
     Write-Host "  Solicitando elevacao via UAC..." -ForegroundColor Yellow
 
-    # Se executado de arquivo local, relanca o proprio arquivo
+    # Resolve caminho do script
     $cmdPath = $PSCommandPath
     if (-not $cmdPath) { $cmdPath = $MyInvocation.PSCommandPath }
     if (-not $cmdPath) { $cmdPath = $MyInvocation.MyCommand.Path }
 
-    try {
-        if ($cmdPath -and (Test-Path -LiteralPath $cmdPath)) {
-            # Modo arquivo local: passa todos os parametros originais
-            $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$cmdPath`"")
-            foreach ($p in $PSBoundParameters.GetEnumerator()) {
-                if ($p.Value -is [switch] -and $p.Value) {
-                    $argList += "-$($p.Key)"
-                } elseif ($p.Value -is [array]) {
-                    $argList += "-$($p.Key)"
-                    $argList += ($p.Value -join ',')
-                } else {
-                    $argList += "-$($p.Key)"
-                    $argList += "`"$($p.Value)`""
-                }
+    if (-not ($cmdPath -and (Test-Path -LiteralPath $cmdPath))) {
+        # Modo irm | iex: nao tem como relancar
+        Write-Host "  $($script:SymFail) Detectado modo irm | iex (sem arquivo local)." -ForegroundColor Red
+        Write-Host "  Por favor, abra um PowerShell como Administrador e execute:" -ForegroundColor Yellow
+        Write-Host "    irm <URL-DO-SCRIPT> | iex" -ForegroundColor White
+        exit 1
+    }
+
+    # Constroi lista de parametros para repassar
+    $paramArgs = @()
+    foreach ($p in $PSBoundParameters.GetEnumerator()) {
+        if ($p.Value -is [System.Management.Automation.SwitchParameter] -and $p.Value) {
+            $paramArgs += "-$($p.Key)"
+        } elseif ($p.Value -is [array]) {
+            $paramArgs += "-$($p.Key)"
+            foreach ($item in $p.Value) {
+                $paramArgs += "`"$item`""
             }
-            $proc = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -PassThru -ErrorAction Stop
+        } else {
+            $paramArgs += "-$($p.Key)"
+            $paramArgs += "`"$($p.Value)`""
+        }
+    }
+
+    # Detecta shells disponiveis (preferencia: pwsh > powershell)
+    $shellPath = 'powershell.exe'
+    try {
+        $pwsh = Get-Command pwsh.exe -ErrorAction Stop
+        if ($pwsh) { $shellPath = $pwsh.Source }
+    } catch { }
+
+    # Detecta Windows Terminal (wt.exe) - mantem tela preta moderna
+    $wtPath = $null
+    if (-not $Silent) {
+        try {
+            $wt = Get-Command wt.exe -ErrorAction Stop
+            if ($wt) { $wtPath = $wt.Source }
+        } catch { }
+        # Em algumas instalacoes wt.exe so esta no LocalAppData
+        if (-not $wtPath) {
+            $candidato = "$env:LOCALAPPDATA\Microsoft\WindowsApps\wt.exe"
+            if (Test-Path -LiteralPath $candidato) { $wtPath = $candidato }
+        }
+    }
+
+    try {
+        if ($wtPath) {
+            # PREFERENCIA: Windows Terminal abre janela preta moderna
+            # wt.exe -w -1 forca nova janela (necessario quando elevado a partir de sessao nao-elevada)
+            $wtArgs = @(
+                '-w','-1',
+                'new-tab',
+                '--title','remove-apps',
+                '--suppressApplicationTitle',
+                '--',
+                $shellPath,
+                '-NoProfile',
+                '-ExecutionPolicy','Bypass',
+                '-File',"`"$cmdPath`""
+            ) + $paramArgs
+            Write-Host "  $($script:SymInfo) Abrindo Windows Terminal elevado..." -ForegroundColor Gray
+            $proc = Start-Process -FilePath $wtPath -Verb RunAs -ArgumentList $wtArgs -PassThru -ErrorAction Stop
             $proc.WaitForExit()
             exit $proc.ExitCode
         } else {
-            # Modo irm | iex: nao tem como reexecutar, avisa o usuario
-            Write-Host "  $($script:SymFail) Detectado modo irm | iex (sem arquivo local)." -ForegroundColor Red
-            Write-Host "  Por favor, abra um PowerShell como Administrador e execute:" -ForegroundColor Yellow
-            Write-Host "    irm <URL-DO-SCRIPT> | iex" -ForegroundColor White
-            exit 1
+            # FALLBACK: powershell/pwsh com BackgroundColor=Black forcado via -Command
+            # Resultado: conhost legacy mas com fundo preto (em vez do azul padrao)
+            $paramStr = $paramArgs -join ' '
+            $cmdString = @"
+try {
+  `$Host.UI.RawUI.BackgroundColor = 'Black'
+  `$Host.UI.RawUI.ForegroundColor = 'White'
+  Clear-Host
+} catch {}
+& '$cmdPath' $paramStr
+"@
+            $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-Command', $cmdString)
+            Write-Host "  $($script:SymInfo) Abrindo console elevado (fundo preto forcado)..." -ForegroundColor Gray
+            $proc = Start-Process -FilePath $shellPath -Verb RunAs -ArgumentList $argList -PassThru -ErrorAction Stop
+            $proc.WaitForExit()
+            exit $proc.ExitCode
         }
     } catch {
         Write-Host "  $($script:SymFail) Elevacao cancelada: $($_.Exception.Message)" -ForegroundColor Red
@@ -632,7 +707,7 @@ function Test-IsProtectedApp {
 .PARAMETER WingetId
     Se o pacote tambem deve ser desinstalado via winget (Win11 24H2 Copilot, etc).
 #>
-function Remove-AppPackage {
+function Invoke-AppPackageRemoval {
     [CmdletBinding(SupportsShouldProcess=$true)]
     param(
         [string]$Categoria,
@@ -770,6 +845,17 @@ function Uninstall-OneDriveWin32 {
     }
 }
 
+function Set-RegistryDWordValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [int]$Value,
+        [System.Management.Automation.ActionPreference]$OnError = 'Continue'
+    )
+
+    New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType DWord -Force -ErrorAction $OnError | Out-Null
+}
+
 <#
 .SYNOPSIS
     Aplica politicas via Registry para bloquear reinstalacao automatica de bloatware.
@@ -798,10 +884,10 @@ function Block-AppReinstall {
             if (-not (Test-Path -LiteralPath $regPath)) {
                 New-Item -Path $regPath -Force -ErrorAction Stop | Out-Null
             }
-            Set-ItemProperty -Path $regPath -Name 'DisableWindowsConsumerFeatures' -Value 1 -Type DWord -ErrorAction Stop
-            Set-ItemProperty -Path $regPath -Name 'DisableConsumerAccountStateContent' -Value 1 -Type DWord -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $regPath -Name 'DisableSoftLanding' -Value 1 -Type DWord -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $regPath -Name 'DisableThirdPartySuggestions' -Value 1 -Type DWord -ErrorAction SilentlyContinue
+            Set-RegistryDWordValue -Path $regPath -Name 'DisableWindowsConsumerFeatures' -Value 1 -OnError Stop
+            Set-RegistryDWordValue -Path $regPath -Name 'DisableConsumerAccountStateContent' -Value 1 -OnError SilentlyContinue
+            Set-RegistryDWordValue -Path $regPath -Name 'DisableSoftLanding' -Value 1 -OnError SilentlyContinue
+            Set-RegistryDWordValue -Path $regPath -Name 'DisableThirdPartySuggestions' -Value 1 -OnError SilentlyContinue
             Write-Ok "CloudContent: GPO aplicada (Pro/Enterprise)"
             $changes++
         } catch {
@@ -836,7 +922,7 @@ function Block-AppReinstall {
                 New-Item -Path $cdmPath -Force -ErrorAction Stop | Out-Null
             }
             foreach ($k in $cdmKeys) {
-                Set-ItemProperty -Path $cdmPath -Name $k -Value 0 -Type DWord -ErrorAction SilentlyContinue
+                Set-RegistryDWordValue -Path $cdmPath -Name $k -Value 0 -OnError SilentlyContinue
             }
             Write-Ok "${scope}\ContentDeliveryManager: $($cdmKeys.Count) chaves desativadas"
             $changes++
@@ -852,7 +938,7 @@ function Block-AppReinstall {
             if (-not (Test-Path -LiteralPath $storePath)) {
                 New-Item -Path $storePath -Force -ErrorAction Stop | Out-Null
             }
-            Set-ItemProperty -Path $storePath -Name 'AutoDownload' -Value 2 -Type DWord -ErrorAction Stop
+            Set-RegistryDWordValue -Path $storePath -Name 'AutoDownload' -Value 2 -OnError Stop
             Write-Ok "WindowsStore: AutoDownload desativado"
             $changes++
         } catch {
@@ -867,7 +953,7 @@ function Block-AppReinstall {
 # Menu interativo / nao-interativo
 # ----------------------------------------------------------
 function Get-CategoriasParaRemover {
-    if ($Tudo) { return $script:APPS.Keys }
+    if ($Tudo) { return $script:AppsCatalog.Keys }
     if ($Apps) { return $Apps }
 
     # Modo interativo
@@ -876,8 +962,8 @@ function Get-CategoriasParaRemover {
 
     $i = 1
     $idx = @{}
-    foreach ($cat in $script:APPS.Keys) {
-        $info = $script:APPS[$cat]
+    foreach ($cat in $script:AppsCatalog.Keys) {
+        $info = $script:AppsCatalog[$cat]
         Write-Host ("  [{0,2}] {1}" -f $i, $info.Display) -ForegroundColor Yellow
         $idx[$i.ToString()] = $cat
         $i++
@@ -898,7 +984,7 @@ function Get-CategoriasParaRemover {
 
         foreach ($p in $partes) {
             if ($p -eq ($totalIdx + 1).ToString()) {
-                return $script:APPS.Keys
+                return $script:AppsCatalog.Keys
             }
             if ($idx.ContainsKey($p)) {
                 $selecionadas += $idx[$p]
@@ -942,7 +1028,7 @@ if (-not $categorias -or $categorias.Count -eq 0) {
 Write-Host ""
 Write-Host "  Categorias selecionadas:" -ForegroundColor White
 foreach ($c in $categorias) {
-    Write-Host ("    - {0}: {1}" -f $c, $script:APPS[$c].Display) -ForegroundColor Cyan
+    Write-Host ("    - {0}: {1}" -f $c, $script:AppsCatalog[$c].Display) -ForegroundColor Cyan
 }
 Write-Host ""
 
@@ -969,12 +1055,12 @@ Write-Ok "Provisioned: $($provisionedList.Count) pacotes  |  Installed: $($insta
 
 # Itera categorias
 foreach ($cat in $categorias) {
-    $info = $script:APPS[$cat]
+    $info = $script:AppsCatalog[$cat]
     Write-Phase "$cat - $($info.Display)"
 
     foreach ($app in $info.Apps) {
         $wingetId = if ($info.PSObject.Properties['Winget']) { $info.Winget } else { '' }
-        Remove-AppPackage -Categoria $cat -App $app `
+        Invoke-AppPackageRemoval -Categoria $cat -App $app `
             -ProvisionedList $provisionedList `
             -InstalledList $installedList `
             -WingetId $wingetId
