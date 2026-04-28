@@ -56,7 +56,7 @@
 
 .NOTES
     Autor       : Victor Hugo Gomides (refatorado em 2026)
-    Versao      : 2.0.0
+    Versao      : 2.0.2
     Compatibilidade : Windows 10/11, Server 2016+, PowerShell 5.1+
     RequerAdmin : sim
 #>
@@ -82,9 +82,11 @@ $ErrorActionPreference = "Continue"
 # ----------------------------------------------------------
 # Versao e historico
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.0.1"
+$SCRIPT_VERSION = "2.0.2"
 $SCRIPT_DATA    = "28/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.0.2"; Data = "28/04/2026"; Descricao = "Visual: alinha fluxo de remocao ao padrao do ia-install com resumo unico e categorias mais explicitas" },
+    [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "UX: remove simbolos Unicode da interface e pergunta se deseja voltar ao menu apos concluir" },
     [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: auto-elevacao preserva arrays como -Apps Xbox Cortana em vez de string unica" },
     [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: escrita de DWORD no Registry usa New-ItemProperty -PropertyType DWord em vez de Set-ItemProperty -Type" },
     [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: funcao interna Remove-AppPackage renomeada para Invoke-AppPackageRemoval para evitar colisao com cmdlets/modulos externos" },
@@ -371,48 +373,26 @@ $script:Compat.GpoApplica = ($script:Compat.Edition -in @('Pro','Enterprise','Ed
 try { $null = & winget --version 2>&1; $script:Compat.HasWinget = ($LASTEXITCODE -eq 0) } catch { }
 
 # ----------------------------------------------------------
-# Simbolos Unicode + ASCII fallback + Box drawing
+# Simbolos ASCII - evita caracteres que falham em consoles/fontes diferentes
 # ----------------------------------------------------------
-if ($script:Compat.UnicodeOk) {
-    $script:SymOk     = [char]0x2713  # ✓
-    $script:SymFail   = [char]0x2717  # ✗
-    $script:SymWarn   = [char]0x26A0  # ⚠
-    $script:SymStep   = [char]0x25B6  # ▶
-    $script:SymInfo   = [char]0x2139  # ℹ
-    $script:SymBullet = [char]0x2022  # •
-    $script:SymTrash  = [char]0x2716  # ✖
-    # 🛡 (U+1F6E1) esta fora do BMP, [char] e UTF-16 16-bit so suporta <= 0xFFFF.
-    # ConvertFromUtf32 devolve a surrogate pair correta como string.
-    $script:SymShield = [Char]::ConvertFromUtf32(0x1F6E1)
-    $script:BoxTL     = [char]0x256D
-    $script:BoxTR     = [char]0x256E
-    $script:BoxBL     = [char]0x2570
-    $script:BoxBR     = [char]0x256F
-    $script:BoxH      = [char]0x2500
-    $script:BoxV      = [char]0x2502
-    $script:SpinFrames = @(
-        [char]0x280B,[char]0x2819,[char]0x2839,[char]0x2838,[char]0x283C,
-        [char]0x2834,[char]0x2826,[char]0x2827,[char]0x2807,[char]0x280F
-    )
-} else {
-    $script:SymOk     = '+'
-    $script:SymFail   = 'X'
-    $script:SymWarn   = '!'
-    $script:SymStep   = '>'
-    $script:SymInfo   = 'i'
-    $script:SymBullet = '*'
-    $script:SymTrash  = 'X'
-    $script:SymShield = '#'
-    $script:BoxTL = '+'; $script:BoxTR = '+'; $script:BoxBL = '+'; $script:BoxBR = '+'
-    $script:BoxH = '-';  $script:BoxV = '|'
-    $script:SpinFrames = @('|','/','-','\')
-}
+$script:SymOk     = 'OK'
+$script:SymFail   = 'ERRO'
+$script:SymWarn   = 'AVISO'
+$script:SymStep   = '>'
+$script:SymInfo   = 'INFO'
+$script:SymBullet = '-'
+$script:SymTrash  = 'X'
+$script:SymShield = 'PROT'
+$script:BoxTL = '+'; $script:BoxTR = '+'; $script:BoxBL = '+'; $script:BoxBR = '+'
+$script:BoxH = '-';  $script:BoxV = '|'
+$script:SpinFrames = @('|','/','-','\')
 
 # ----------------------------------------------------------
 # State global
 # ----------------------------------------------------------
 $script:RemoveResults  = @()
 $script:ScriptStartTime = $null
+$script:ForceMenu = $false
 
 # ----------------------------------------------------------
 # UI helpers
@@ -477,6 +457,19 @@ function Confirm-Tecla {
         $key = [Console]::ReadKey($true)
         if ($key.Key -eq 'Enter') { Write-Host "Sim" -ForegroundColor Green; return $true }
         if ($key.Key -eq 'Escape') { Write-Host "Nao" -ForegroundColor Gray; return $false }
+    }
+}
+
+function Confirm-VoltarMenu {
+    if ($script:NonInteractive) { return $false }
+
+    Write-Host ""
+    Write-Host "  O que deseja fazer agora? [ENTER = voltar ao menu | ESC = sair] " -ForegroundColor White -NoNewline
+
+    while ($true) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq 'Enter') { Write-Host "Voltar ao menu" -ForegroundColor Cyan; return $true }
+        if ($key.Key -eq 'Escape') { Write-Host "Sair" -ForegroundColor Yellow; return $false }
     }
 }
 
@@ -953,8 +946,10 @@ function Block-AppReinstall {
 # Menu interativo / nao-interativo
 # ----------------------------------------------------------
 function Get-CategoriasParaRemover {
-    if ($Tudo) { return $script:AppsCatalog.Keys }
-    if ($Apps) { return $Apps }
+    if (-not $script:ForceMenu) {
+        if ($Tudo) { return $script:AppsCatalog.Keys }
+        if ($Apps) { return $Apps }
+    }
 
     # Modo interativo
     Write-Host "  Selecione as categorias a remover (numeros separados por virgula):" -ForegroundColor White
@@ -1010,83 +1005,87 @@ function Get-CategoriasParaRemover {
 # ============================================================
 try {
 
-$script:ScriptStartTime = Get-Date
-Write-Banner
+while ($true) {
+    $script:RemoveResults = @()
+    $script:ScriptStartTime = Get-Date
+    Write-Banner
 
-if ($script:Compat.WindowsVer -eq 'Server') {
-    Write-Warn "Detectado Windows Server. Alguns apps consumer nem existem nesta edicao."
-}
-
-# Resolve categorias
-$categorias = Get-CategoriasParaRemover
-if (-not $categorias -or $categorias.Count -eq 0) {
-    Write-Warn "Nenhuma categoria selecionada. Encerrando."
-    exit 0
-}
-
-# Mostra plano
-Write-Host ""
-Write-Host "  Categorias selecionadas:" -ForegroundColor White
-foreach ($c in $categorias) {
-    Write-Host ("    - {0}: {1}" -f $c, $script:AppsCatalog[$c].Display) -ForegroundColor Cyan
-}
-Write-Host ""
-
-if (-not $script:NonInteractive) {
-    if (-not (Confirm-Tecla "Confirmar remocao?")) {
-        Write-Warn "Operacao cancelada."
-        exit 0
-    }
-}
-
-# Carrega listas de pacotes UMA VEZ (otimizacao)
-Write-Phase "Carregando inventario Appx"
-Write-Step "Listando provisioned packages..."
-$provisionedList = @()
-try { $provisionedList = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop) } catch {
-    Write-Warn "Get-AppxProvisionedPackage falhou: $($_.Exception.Message)"
-}
-Write-Step "Listando installed packages (-AllUsers)..."
-$installedList = @()
-try { $installedList = @(Get-AppxPackage -AllUsers -ErrorAction Stop) } catch {
-    Write-Warn "Get-AppxPackage -AllUsers falhou: $($_.Exception.Message)"
-}
-Write-Ok "Provisioned: $($provisionedList.Count) pacotes  |  Installed: $($installedList.Count) pacotes"
-
-# Itera categorias
-foreach ($cat in $categorias) {
-    $info = $script:AppsCatalog[$cat]
-    Write-Phase "$cat - $($info.Display)"
-
-    foreach ($app in $info.Apps) {
-        $wingetId = if ($info.PSObject.Properties['Winget']) { $info.Winget } else { '' }
-        Invoke-AppPackageRemoval -Categoria $cat -App $app `
-            -ProvisionedList $provisionedList `
-            -InstalledList $installedList `
-            -WingetId $wingetId
+    if ($script:Compat.WindowsVer -eq 'Server') {
+        Write-Warn "Detectado Windows Server. Alguns apps consumer nem existem nesta edicao."
     }
 
-    # Tratamento especial: OneDrive Win32
-    if ($cat -eq 'OneDrive' -and $info.PSObject.Properties['Win32'] -and $info.Win32) {
-        Uninstall-OneDriveWin32 -Categoria $cat
+    # Resolve categorias
+    $categorias = Get-CategoriasParaRemover
+    if (-not $categorias -or $categorias.Count -eq 0) {
+        Write-Warn "Nenhuma categoria selecionada. Encerrando."
+        break
     }
-}
 
-# Bloqueio de reinstalacao
-if (-not $NoBlockReinstall) {
-    Write-Phase "Bloqueio de reinstalacao automatica"
-    Block-AppReinstall
-} else {
-    Write-Info "Bloqueio de reinstalacao pulado (-NoBlockReinstall)."
-}
-
-# Resumo final
-Show-Summary
-
-if (-not $script:NonInteractive) {
+    # Mostra plano
     Write-Host ""
-    Write-Host "  Pressione qualquer tecla para sair..." -ForegroundColor Gray
-    [Console]::ReadKey($true) | Out-Null
+    Write-Host "  Categorias selecionadas:" -ForegroundColor White
+    foreach ($c in $categorias) {
+        Write-Host ("    - {0}: {1}" -f $c, $script:AppsCatalog[$c].Display) -ForegroundColor Cyan
+    }
+    Write-Host ""
+
+    if (-not $script:NonInteractive) {
+        if (-not (Confirm-Tecla "Confirmar remocao?")) {
+            Write-Warn "Operacao cancelada."
+            break
+        }
+    }
+
+    # Carrega listas de pacotes UMA VEZ (otimizacao)
+    Write-Phase "Carregando inventario Appx"
+    Write-Step "Listando provisioned packages..."
+    $provisionedList = @()
+    try { $provisionedList = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop) } catch {
+        Write-Warn "Get-AppxProvisionedPackage falhou: $($_.Exception.Message)"
+    }
+    Write-Step "Listando installed packages (-AllUsers)..."
+    $installedList = @()
+    try { $installedList = @(Get-AppxPackage -AllUsers -ErrorAction Stop) } catch {
+        Write-Warn "Get-AppxPackage -AllUsers falhou: $($_.Exception.Message)"
+    }
+    Write-Ok "Provisioned: $($provisionedList.Count) pacotes  |  Installed: $($installedList.Count) pacotes"
+
+    # Itera categorias
+    foreach ($cat in $categorias) {
+        $info = $script:AppsCatalog[$cat]
+        Write-Phase "$cat - $($info.Display)"
+
+        foreach ($app in $info.Apps) {
+            $wingetId = if ($info.PSObject.Properties['Winget']) { $info.Winget } else { '' }
+            Invoke-AppPackageRemoval -Categoria $cat -App $app `
+                -ProvisionedList $provisionedList `
+                -InstalledList $installedList `
+                -WingetId $wingetId
+        }
+
+        # Tratamento especial: OneDrive Win32
+        if ($cat -eq 'OneDrive' -and $info.PSObject.Properties['Win32'] -and $info.Win32) {
+            Uninstall-OneDriveWin32 -Categoria $cat
+        }
+    }
+
+    # Bloqueio de reinstalacao
+    if (-not $NoBlockReinstall) {
+        Write-Phase "Bloqueio de reinstalacao automatica"
+        Block-AppReinstall
+    } else {
+        Write-Info "Bloqueio de reinstalacao pulado (-NoBlockReinstall)."
+    }
+
+    # Resumo final
+    Show-Summary
+
+    if (Confirm-VoltarMenu) {
+        $script:ForceMenu = $true
+        continue
+    }
+
+    break
 }
 
 } catch {
