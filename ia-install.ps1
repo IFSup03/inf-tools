@@ -103,9 +103,14 @@ if ($LogPath -or ($Silent -and -not $LogPath)) {
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.9.5"
-$SCRIPT_DATA    = "24/04/2026"
+$SCRIPT_VERSION = "2.9.6"
+$SCRIPT_DATA    = "28/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.9.6"; Data = "28/04/2026"; Descricao = "Fix: Install-NodeJS detecta admin e cai em portable .zip (LocalAppData) quando sem privilegio" },
+    [PSCustomObject]@{ Versao = "2.9.6"; Data = "28/04/2026"; Descricao = "Fix: novo helper Test-IsAdmin + Install-NodeJSPortable (.zip oficial nodejs.org)" },
+    [PSCustomObject]@{ Versao = "2.9.6"; Data = "28/04/2026"; Descricao = "Fix: tenta winget --scope user antes do .zip portable (mais limpo quando disponivel)" },
+    [PSCustomObject]@{ Versao = "2.9.6"; Data = "28/04/2026"; Descricao = "Fix: Test-NpmDisponivel inclui LocalAppData\\nodejs e WinGet\\Packages user-scope" },
+    [PSCustomObject]@{ Versao = "2.9.6"; Data = "28/04/2026"; Descricao = "Fix: detecta arquitetura ARM64/x64/x86 ao baixar Node.js portable" },
     [PSCustomObject]@{ Versao = "2.9.5"; Data = "24/04/2026"; Descricao = "Visual: bordas Unicode arredondadas (cantos suaves) com fallback ASCII" },
     [PSCustomObject]@{ Versao = "2.9.5"; Data = "24/04/2026"; Descricao = "Visual: spinner Braille (10 frames Unicode) padrao npm/cargo, mais suave em 80ms" },
     [PSCustomObject]@{ Versao = "2.9.5"; Data = "24/04/2026"; Descricao = "Visual: progress bar com blocos solidos e gradient (cheio/medio/leve/vazio)" },
@@ -1131,16 +1136,30 @@ Set-Alias -Name Broadcast-EnvChange -Value Send-EnvChangeNotification -Scope Scr
 # --- Deteccao confiavel de npm (PS 5.1 compativel) ---
 # Usa Get-Command (nao depende de $ErrorActionPreference=Stop)
 # Em UAC-elevado-com-outra-conta, considera o APPDATA do usuario real.
+# Inclui paths user-scope para cenario sem admin (portable ou winget --scope user).
 function Test-NpmDisponivel {
     $u = Get-UsuarioInterativo
     $nodePaths = @(
         "$env:ProgramFiles\nodejs",
         "${env:ProgramFiles(x86)}\nodejs",
-        "$($u.AppData)\npm",     # perfil do usuario real
-        "$env:APPDATA\npm"       # fallback: perfil do admin elevado
+        (Join-Path $u.LocalAppData "nodejs"),                  # portable do usuario real (TS/UAC)
+        "$env:LOCALAPPDATA\nodejs",                            # portable do processo atual
+        "$($u.AppData)\npm",                                   # npm prefix do usuario real
+        "$env:APPDATA\npm"                                     # fallback: perfil do admin elevado
     )
+    # winget --scope user instala em pasta versionada
+    try {
+        $wingetUser = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
+        if (Test-Path -LiteralPath $wingetUser -ErrorAction SilentlyContinue) {
+            $nodejsWinget = Get-ChildItem -LiteralPath $wingetUser -Directory `
+                -Filter "OpenJS.NodeJS*" -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName
+            if ($nodejsWinget) { $nodePaths += $nodejsWinget }
+        }
+    } catch { }
+
     foreach ($p in $nodePaths) {
-        if ((Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$p*")) {
+        if ($p -and (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$p*")) {
             $env:Path = "$p;$env:Path"
         }
     }
@@ -1171,61 +1190,213 @@ function Update-SessionPath {
 $script:NodeJSTentado   = $false
 $script:NodeJSResultado = $false
 
-# --- Instala Node.js para todo o sistema (ALLUSERS=1) ---
+<#
+.SYNOPSIS
+    Verifica se o processo atual esta rodando com privilegios de Administrador.
+.OUTPUTS
+    [bool] $true se elevado, $false caso contrario.
+#>
+function Test-IsAdmin {
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Instala Node.js no perfil do usuario via .zip portable (sem necessidade de admin).
+.DESCRIPTION
+    Baixa o .zip oficial do nodejs.org, extrai em %LOCALAPPDATA%\nodejs e
+    grava o caminho no PATH do usuario via Set-UserEnvVar (UAC-aware).
+    Detecta arquitetura (x64/x86/arm64) automaticamente.
+.OUTPUTS
+    [bool] $true em sucesso, $false em falha.
+#>
+function Install-NodeJSPortable {
+    [CmdletBinding()]
+    param()
+
+    $u = Get-UsuarioInterativo
+    $targetDir = Join-Path $u.LocalAppData "nodejs"
+
+    try {
+        Write-Step "Buscando ultima versao LTS do Node.js..."
+        $nodeInfo = Invoke-RestMethod "https://nodejs.org/dist/index.json" -ErrorAction Stop
+        $lts      = $nodeInfo | Where-Object { $_.lts } | Select-Object -First 1
+        if (-not $lts) { throw "Nao encontrei release LTS no index.json" }
+        $version = $lts.version  # ex: v20.18.1
+
+        # Detecta arquitetura
+        $arch = 'x64'
+        if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { $arch = 'arm64' }
+        elseif (-not [Environment]::Is64BitOperatingSystem) { $arch = 'x86' }
+
+        $zipName = "node-$version-win-$arch.zip"
+        $url     = "https://nodejs.org/dist/$version/$zipName"
+        $zipPath = Join-Path $env:TEMP $zipName
+
+        Write-Step "Baixando Node.js $version ($arch) portable..."
+        $ok = Invoke-FastDownload -Url $url -OutFile $zipPath -Label "Node.js $version ($arch)"
+        if (-not $ok -or -not (Test-Path -LiteralPath $zipPath)) {
+            throw "Download falhou"
+        }
+
+        # Backup + extract
+        if (Test-Path -LiteralPath $targetDir) {
+            Write-Step "Removendo instalacao anterior em $targetDir..."
+            Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        $tempExtract = Join-Path $env:TEMP ("node-extract-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tempExtract -Force | Out-Null
+
+        Write-Step "Extraindo para $targetDir..."
+        try {
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $tempExtract -Force -ErrorAction Stop
+        } catch {
+            # Fallback para .NET ZipFile (PS 5.1 sem Expand-Archive)
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $tempExtract)
+        }
+
+        # O zip contem uma pasta tipo "node-v20.18.1-win-x64". Move conteudo direto.
+        $extracted = Get-ChildItem -LiteralPath $tempExtract -Directory | Select-Object -First 1
+        if (-not $extracted) {
+            throw "Estrutura inesperada no zip extraido."
+        }
+
+        # Garante que o diretorio pai existe (LocalAppData sempre existe, mas por seguranca)
+        $parent = Split-Path -Parent $targetDir
+        if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        Move-Item -LiteralPath $extracted.FullName -Destination $targetDir -Force
+
+        # Cleanup
+        Remove-Item -LiteralPath $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+
+        # Adiciona ao PATH do usuario (UAC-aware via Set-UserEnvVar)
+        Write-Step "Adicionando $targetDir ao PATH do usuario..."
+        Set-UserEnvVar -Name "Path" -Value $targetDir -Append
+        Set-UserEnvVar -Name "Path" -Value (Join-Path $u.AppData "npm") -Append
+
+        # Atualiza PATH da sessao atual
+        if ($env:Path -notlike "*$targetDir*") {
+            $env:Path = "$targetDir;$env:Path"
+        }
+        $userNpm = Join-Path $u.AppData "npm"
+        if ($env:Path -notlike "*$userNpm*") {
+            $env:Path = "$userNpm;$env:Path"
+        }
+
+        Write-Ok "Node.js $version instalado em $targetDir (perfil do usuario)."
+        return $true
+    } catch {
+        Write-Fail "Falha na instalacao portable: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Instala Node.js LTS. Detecta privilegio admin e escolhe estrategia automaticamente.
+.DESCRIPTION
+    Com admin: instalacao system-wide (winget --scope machine ou MSI ALLUSERS=1).
+    Sem admin: instalacao no perfil do usuario (winget --scope user ou .zip portable).
+.PARAMETER WingetOk
+    Indica se winget esta disponivel na sessao atual.
+#>
 function Install-NodeJS {
     param([bool]$WingetOk)
 
+    $isAdmin = Test-IsAdmin
     $nodeInstalled = $false
 
-    # Tenta via winget primeiro (mais confiavel)
-    if ($WingetOk) {
-        try {
-            Write-Step "Instalando Node.js LTS via winget..."
-            & winget install --id OpenJS.NodeJS.LTS --silent --scope machine `
-                --accept-package-agreements --accept-source-agreements 2>&1 |
-                Where-Object { $_ -notmatch '^\s*[-\\|/]\s*$' } |
-                ForEach-Object { if ($_.Trim()) { Write-Host $_ } }
-            $nodeInstalled = $true
-        } catch {
-            Write-Warn "winget falhou. Tentando download direto..."
-        }
-    }
+    if ($isAdmin) {
+        Write-Info "Privilegio Administrador detectado. Instalando Node.js para todos os usuarios."
 
-    # Fallback: download direto do MSI com ALLUSERS=1
-    if (-not $nodeInstalled) {
-        try {
-            Write-Step "Baixando instalador do Node.js LTS..."
-            $nodeInfo    = Invoke-RestMethod "https://nodejs.org/dist/index.json"
-            $lts         = $nodeInfo | Where-Object { $_.lts } | Select-Object -First 1
-            $nodeVersion = $lts.version
-            $nodeUrl     = "https://nodejs.org/dist/$nodeVersion/node-$nodeVersion-x64.msi"
-            $nodeMsi     = "$env:TEMP\node-lts.msi"
-            $null = Invoke-FastDownload -Url $nodeUrl -OutFile $nodeMsi -Label "Node.js $nodeVersion MSI"
-            Write-Step "Instalando Node.js $nodeVersion para todos os usuarios..."
-            # ALLUSERS=1 garante instalacao para todo o sistema, nao so o usuario atual
-            Start-Process msiexec.exe -ArgumentList "/i `"$nodeMsi`" /quiet /norestart ALLUSERS=1" -Wait
-            Remove-Item $nodeMsi -Force -ErrorAction SilentlyContinue
-            $nodeInstalled = $true
-        } catch {
-            Write-Fail "Falha ao instalar Node.js: $_"
+        # 1) winget --scope machine
+        if ($WingetOk) {
+            try {
+                Write-Step "Instalando Node.js LTS via winget (scope=machine)..."
+                & winget install --id OpenJS.NodeJS.LTS --silent --scope machine `
+                    --accept-package-agreements --accept-source-agreements 2>&1 |
+                    Where-Object { $_ -notmatch '^\s*[-\\|/]\s*$' } |
+                    ForEach-Object { if ($_.Trim()) { Write-Host $_ } }
+                if ($LASTEXITCODE -eq 0) { $nodeInstalled = $true }
+            } catch {
+                Write-Warn "winget --scope machine falhou. Tentando MSI direto..."
+            }
+        }
+
+        # 2) MSI ALLUSERS=1
+        if (-not $nodeInstalled) {
+            try {
+                Write-Step "Baixando instalador do Node.js LTS..."
+                $nodeInfo    = Invoke-RestMethod "https://nodejs.org/dist/index.json"
+                $lts         = $nodeInfo | Where-Object { $_.lts } | Select-Object -First 1
+                $nodeVersion = $lts.version
+                $nodeUrl     = "https://nodejs.org/dist/$nodeVersion/node-$nodeVersion-x64.msi"
+                $nodeMsi     = "$env:TEMP\node-lts.msi"
+                $null = Invoke-FastDownload -Url $nodeUrl -OutFile $nodeMsi -Label "Node.js $nodeVersion MSI"
+                Write-Step "Instalando Node.js $nodeVersion para todos os usuarios..."
+                Start-Process msiexec.exe -ArgumentList "/i `"$nodeMsi`" /quiet /norestart ALLUSERS=1" -Wait
+                Remove-Item $nodeMsi -Force -ErrorAction SilentlyContinue
+                $nodeInstalled = $true
+            } catch {
+                Write-Fail "Falha MSI ALLUSERS=1: $_"
+            }
+        }
+    } else {
+        Write-Info "Sem privilegio admin. Instalando Node.js no perfil do usuario (sem MSI)."
+
+        # 1) Tenta winget --scope user (depende de manifest disponivel)
+        if ($WingetOk) {
+            try {
+                Write-Step "Tentando winget (scope=user)..."
+                & winget install --id OpenJS.NodeJS.LTS --silent --scope user `
+                    --accept-package-agreements --accept-source-agreements 2>&1 |
+                    Where-Object { $_ -notmatch '^\s*[-\\|/]\s*$' } |
+                    ForEach-Object { if ($_.Trim()) { Write-Host $_ } }
+                if ($LASTEXITCODE -eq 0) { $nodeInstalled = $true }
+            } catch {
+                Write-Warn "winget --scope user falhou ou nao suporta este pacote."
+            }
+        }
+
+        # 2) Fallback: portable .zip (sempre funciona, sem admin)
+        if (-not $nodeInstalled) {
+            $nodeInstalled = Install-NodeJSPortable
         }
     }
 
     if ($nodeInstalled) {
-        # Recarrega PATH completo do registro (MSI atualizou Machine)
+        # Recarrega PATH completo do registro (MSI atualizou Machine, ou Set-UserEnvVar atualizou User)
         Update-SessionPath
 
-        # Garante caminhos padrao tambem (caso PATH do registro ainda nao reflita)
+        # Garante caminhos padrao - inclui user-scope (LocalAppData\nodejs) para
+        # cenario sem admin (instalacao portable ou winget --scope user)
         $u = Get-UsuarioInterativo
         $nodePaths = @(
             "$env:ProgramFiles\nodejs",
             "${env:ProgramFiles(x86)}\nodejs",
+            (Join-Path $u.LocalAppData "nodejs"),                            # portable user
+            "$env:LOCALAPPDATA\nodejs",                                       # admin elevado portable
+            "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\OpenJS.NodeJS.LTS_*",# winget user
             "$($u.AppData)\npm",
             "$env:APPDATA\npm"
         )
         foreach ($p in $nodePaths) {
-            if ((Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$p*")) {
-                $env:Path = "$p;$env:Path"
+            # Resolve wildcards (winget cria pasta com versao no nome)
+            $expanded = if ($p -match '\*') { Get-ChildItem -Path $p -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName } else { @($p) }
+            foreach ($e in $expanded) {
+                if ($e -and (Test-Path -LiteralPath $e -ErrorAction SilentlyContinue) -and ($env:Path -notlike "*$e*")) {
+                    $env:Path = "$e;$env:Path"
+                }
             }
         }
 
