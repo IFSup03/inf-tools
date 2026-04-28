@@ -103,9 +103,14 @@ if ($LogPath -or ($Silent -and -not $LogPath)) {
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.9.4"
+$SCRIPT_VERSION = "2.9.5"
 $SCRIPT_DATA    = "24/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.9.5"; Data = "24/04/2026"; Descricao = "Visual: bordas Unicode arredondadas (cantos suaves) com fallback ASCII" },
+    [PSCustomObject]@{ Versao = "2.9.5"; Data = "24/04/2026"; Descricao = "Visual: spinner Braille (10 frames Unicode) padrao npm/cargo, mais suave em 80ms" },
+    [PSCustomObject]@{ Versao = "2.9.5"; Data = "24/04/2026"; Descricao = "Visual: progress bar com blocos solidos e gradient (cheio/medio/leve/vazio)" },
+    [PSCustomObject]@{ Versao = "2.9.5"; Data = "24/04/2026"; Descricao = "Visual: Show-Summary com badges coloridos [INSTALADO]/[ATUALIZADO]/[FALHOU]/[PULADO]" },
+    [PSCustomObject]@{ Versao = "2.9.5"; Data = "24/04/2026"; Descricao = "Visual: tempo total formatado (Xm Ys) + status geral colorido (TUDO CERTO/FALHAS)" },
     [PSCustomObject]@{ Versao = "2.9.4"; Data = "24/04/2026"; Descricao = "Qualidade: testes Pester 5 em ia-install.Tests.ps1 cobrindo Repair-NpmRc e sintaxe" },
     [PSCustomObject]@{ Versao = "2.9.4"; Data = "24/04/2026"; Descricao = "Qualidade: PSScriptAnalyzerSettings.psd1 com regras compativeis PS 5.1/7.4" },
     [PSCustomObject]@{ Versao = "2.9.4"; Data = "24/04/2026"; Descricao = "Modernizacao: switch -Remover combinavel com -Tudo/-CLI/-Desktop/-Pacotes" },
@@ -383,6 +388,26 @@ if ($script:Compat.UnicodeOk) {
     $script:SymStep   = [char]0x25B6  # ▶
     $script:SymInfo   = [char]0x2139  # ℹ
     $script:SymBullet = [char]0x2022  # •
+    $script:SymUp     = [char]0x2191  # ↑ (atualizado)
+    $script:SymDown   = [char]0x2193  # ↓
+    # Box drawing arredondado (cantos suaves, padrao moderno: spinner npm/cargo)
+    $script:BoxTL     = [char]0x256D  # ╭
+    $script:BoxTR     = [char]0x256E  # ╮
+    $script:BoxBL     = [char]0x2570  # ╰
+    $script:BoxBR     = [char]0x256F  # ╯
+    $script:BoxH      = [char]0x2500  # ─
+    $script:BoxV      = [char]0x2502  # │
+    # Blocos para progress bar (gradient natural cheio -> medio -> leve -> vazio)
+    $script:BarFull   = [char]0x2588  # █
+    $script:BarMid    = [char]0x2593  # ▓
+    $script:BarLow    = [char]0x2592  # ▒
+    $script:BarEmpty  = [char]0x2591  # ░
+    # Spinner Braille (padrao npm, cargo, deno, pip)
+    $script:SpinnerFrames = @(
+        [char]0x280B, [char]0x2819, [char]0x2839, [char]0x2838,
+        [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827,
+        [char]0x2807, [char]0x280F
+    )
 } else {
     $script:SymOk     = '+'
     $script:SymFail   = 'X'
@@ -390,6 +415,19 @@ if ($script:Compat.UnicodeOk) {
     $script:SymStep   = '>'
     $script:SymInfo   = 'i'
     $script:SymBullet = '*'
+    $script:SymUp     = '^'
+    $script:SymDown   = 'v'
+    $script:BoxTL     = '+'
+    $script:BoxTR     = '+'
+    $script:BoxBL     = '+'
+    $script:BoxBR     = '+'
+    $script:BoxH      = '-'
+    $script:BoxV      = '|'
+    $script:BarFull   = '#'
+    $script:BarMid    = '='
+    $script:BarLow    = '-'
+    $script:BarEmpty  = '.'
+    $script:SpinnerFrames = @('|','/','-','\')
 }
 
 function Start-Dashboard {
@@ -405,15 +443,17 @@ function Write-Banner {
     $v = $SCRIPT_VERSION
     $line1 = "  ==============================================================="
     Write-Host ""
-    Write-Host "  +=============================================================+" -ForegroundColor Cyan
-    Write-Host "  |                                                             |" -ForegroundColor Cyan
-    Write-Host "  |     I A   T O O L S   I N S T A L L E R                     |" -ForegroundColor White
-    Write-Host "  |                                                             |" -ForegroundColor Cyan
-    Write-Host "  |     Claude  $script:SymBullet  Codex  $script:SymBullet  OpenCode                           |" -ForegroundColor DarkCyan
-    Write-Host "  |                                                             |" -ForegroundColor Cyan
-    Write-Host ("  |     v{0,-6}                                                  |" -f $v) -ForegroundColor DarkGray
-    Write-Host "  |                                                             |" -ForegroundColor Cyan
-    Write-Host "  +=============================================================+" -ForegroundColor Cyan
+    $hLine = ([string]$script:BoxH) * 61
+    $empty = " " * 61
+    Write-Host ("  $($script:BoxTL)$hLine$($script:BoxTR)") -ForegroundColor Cyan
+    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
+    Write-Host ("  $($script:BoxV)     I A   T O O L S   I N S T A L L E R                     $($script:BoxV)") -ForegroundColor White
+    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
+    Write-Host ("  $($script:BoxV)     Claude  $($script:SymBullet)  Codex  $($script:SymBullet)  OpenCode                           $($script:BoxV)") -ForegroundColor DarkCyan
+    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
+    Write-Host ("  $($script:BoxV)     v{0,-6}                                                  $($script:BoxV)" -f $v) -ForegroundColor DarkGray
+    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
+    Write-Host ("  $($script:BoxBL)$hLine$($script:BoxBR)") -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -427,15 +467,17 @@ function Write-Phase {
     if ($title.Length -gt 58) { $title = $title.Substring(0, 58) }
     $titleLine = $title.PadRight(58)
 
+    $hLine = ([string]$script:BoxH) * 59
+
     Write-Host ""
-    Write-Host "  +-----------------------------------------------------------+" -ForegroundColor DarkCyan
-    Write-Host ("  | {0} |" -f $titleLine) -ForegroundColor Cyan
+    Write-Host ("  $($script:BoxTL)$hLine$($script:BoxTR)") -ForegroundColor DarkCyan
+    Write-Host ("  $($script:BoxV) {0} $($script:BoxV)" -f $titleLine) -ForegroundColor Cyan
     if ($elapsed) {
         $elapsedLine = $elapsed.PadRight(58)
         if ($elapsedLine.Length -gt 58) { $elapsedLine = $elapsedLine.Substring(0,58) }
-        Write-Host ("  | {0} |" -f $elapsedLine) -ForegroundColor DarkGray
+        Write-Host ("  $($script:BoxV) {0} $($script:BoxV)" -f $elapsedLine) -ForegroundColor DarkGray
     }
-    Write-Host "  +-----------------------------------------------------------+" -ForegroundColor DarkCyan
+    Write-Host ("  $($script:BoxBL)$hLine$($script:BoxBR)") -ForegroundColor DarkCyan
 }
 
 function Write-Step  { param($msg) Write-Host ("  {0} {1}" -f $script:SymStep, $msg) -ForegroundColor Cyan }
@@ -446,10 +488,13 @@ function Write-Info  { param($msg) Write-Host ("  {0} {1}" -f $script:SymInfo, $
 
 function Show-Spinner {
     param([ScriptBlock]$Action, [string]$Message = "Processando...", [int]$TimeoutSec = 300)
-    $chars = @('|','/','-','\')
+    # Frames Braille (Unicode) com fallback ASCII vindos de $script:SpinnerFrames
+    $chars = $script:SpinnerFrames
     $i = 0
     $job = Start-Job -ScriptBlock $Action
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    # Velocidade ajustada: Braille e suave em ~80ms/frame, ASCII em 120ms
+    $delay = if ($script:Compat.UnicodeOk) { 80 } else { 120 }
     while ($job.State -eq 'Running' -and (Get-Date) -lt $deadline) {
         $c = $chars[$i % $chars.Length]
         $line = "  $c  $Message"
@@ -459,7 +504,7 @@ function Show-Spinner {
             # Em saida redirecionada, imprime so a primeira vez para nao poluir log
             if ($i -eq 0) { Write-Host $line }
         }
-        Start-Sleep -Milliseconds 120
+        Start-Sleep -Milliseconds $delay
         $i++
     }
     if (-not $script:Compat.ConsoleRedir) {
@@ -493,33 +538,70 @@ function Add-InstallResult {
 }
 
 function Show-Summary {
-    $elapsed = if ($script:ScriptStartTime) { ((Get-Date) - $script:ScriptStartTime).ToString("mm\:ss") } else { "00:00" }
+    # Formata tempo total como "2m 34s" ou "34s" para leitura natural
+    $elapsedSpan = if ($script:ScriptStartTime) { (Get-Date) - $script:ScriptStartTime } else { [TimeSpan]::Zero }
+    $elapsedStr = if ($elapsedSpan.TotalMinutes -ge 1) {
+        "{0}m {1}s" -f [int]$elapsedSpan.TotalMinutes, $elapsedSpan.Seconds
+    } else {
+        "{0}s" -f [int]$elapsedSpan.TotalSeconds
+    }
+
+    # Conta resultados por categoria
+    $totOk     = @($script:InstallResults | Where-Object { $_.Status -in @('OK','ATUALIZADO') }).Count
+    $totFail   = @($script:InstallResults | Where-Object { $_.Status -eq 'FALHOU' }).Count
+    $totSkip   = @($script:InstallResults | Where-Object { $_.Status -eq 'PULADO' }).Count
+    $totTotal  = @($script:InstallResults).Count
+
+    # Header colorido conforme resultado geral
+    $headerColor = if ($totFail -gt 0) { 'Red' } elseif ($totOk -eq $totTotal -and $totTotal -gt 0) { 'Green' } else { 'Yellow' }
+    $headerLabel = if ($totFail -gt 0) { 'CONCLUIDO COM FALHAS' } elseif ($totTotal -gt 0) { 'TUDO CERTO' } else { 'NADA A FAZER' }
+
+    $hLine = ([string]$script:BoxH) * 61
+
     Write-Host ""
-    Write-Host "  +=============================================================+" -ForegroundColor Cyan
-    Write-Host ("  |  RESUMO DA INSTALACAO  {0,-37} |" -f ("(tempo total: $elapsed)")) -ForegroundColor White
-    Write-Host "  +=============================================================+" -ForegroundColor Cyan
+    Write-Host ("  $($script:BoxTL)$hLine$($script:BoxTR)") -ForegroundColor Cyan
+    # Linha 1: titulo + tempo total
+    $linha1 = "  RESUMO DA INSTALACAO  (tempo total: $elapsedStr)".PadRight(61)
+    if ($linha1.Length -gt 61) { $linha1 = $linha1.Substring(0, 61) }
+    Write-Host ("  $($script:BoxV)$linha1$($script:BoxV)") -ForegroundColor White
+    # Linha 2: status geral + contagem
+    $linha2 = "  $($script:SymBullet) $headerLabel  ($totOk/$totTotal sucesso, $totFail falhas, $totSkip pulados)".PadRight(61)
+    if ($linha2.Length -gt 61) { $linha2 = $linha2.Substring(0, 61) }
+    Write-Host ("  $($script:BoxV)$linha2$($script:BoxV)") -ForegroundColor $headerColor
+    Write-Host ("  $($script:BoxBL)$hLine$($script:BoxBR)") -ForegroundColor Cyan
 
     if (-not $script:InstallResults -or $script:InstallResults.Count -eq 0) {
-        Write-Host "  |  (Nenhuma ferramenta processada)                            |" -ForegroundColor DarkGray
+        Write-Host "  (Nenhuma ferramenta processada)" -ForegroundColor DarkGray
     } else {
-        Write-Host ("  | {0,-16} {1,-12} {2,-28} |" -f "FERRAMENTA","STATUS","VERSAO / OBS") -ForegroundColor DarkGray
-        Write-Host "  +-------------------------------------------------------------+" -ForegroundColor DarkCyan
+        Write-Host ""
+        # Cabecalho da tabela
+        Write-Host ("    {0,-18} {1,-14} {2}" -f "FERRAMENTA","STATUS","VERSAO / OBS") -ForegroundColor DarkGray
+        $div = ([string]$script:BoxH) * 60
+        Write-Host "    $div" -ForegroundColor DarkGray
+
         foreach ($r in $script:InstallResults) {
-            $cor = switch ($r.Status) {
-                "OK"         { "Green" }
-                "ATUALIZADO" { "Green" }
-                "PULADO"     { "DarkGray" }
-                "FALHOU"     { "Red" }
-                default      { "Yellow" }
+            # Badge colorido por status
+            $badge   = ''
+            $badgeColor = 'Yellow'
+            switch ($r.Status) {
+                'OK'         { $badge = "[$($script:SymOk) INSTALADO]"; $badgeColor = 'Green' }
+                'ATUALIZADO' { $badge = "[$($script:SymUp) ATUALIZADO]"; $badgeColor = 'Cyan' }
+                'PULADO'     { $badge = "[$($script:SymBullet) PULADO]";   $badgeColor = 'DarkGray' }
+                'FALHOU'     { $badge = "[$($script:SymFail) FALHOU]";   $badgeColor = 'Red' }
+                default      { $badge = "[$($r.Status)]" }
             }
+
             $obs = if ($r.Versao) { $r.Versao } elseif ($r.Obs) { $r.Obs } else { "" }
-            if ($obs.Length -gt 28) { $obs = $obs.Substring(0,25) + "..." }
-            $nome = $r.Nome; if ($nome.Length -gt 16) { $nome = $nome.Substring(0,16) }
-            $status = $r.Status; if ($status.Length -gt 12) { $status = $status.Substring(0,12) }
-            Write-Host ("  | {0,-16} {1,-12} {2,-28} |" -f $nome, $status, $obs) -ForegroundColor $cor
+            if ($obs.Length -gt 32) { $obs = $obs.Substring(0,29) + "..." }
+            $nome = $r.Nome
+            if ($nome.Length -gt 18) { $nome = $nome.Substring(0,18) }
+
+            # Linha em segmentos coloridos: nome (white) badge (color) obs (DarkGray)
+            Write-Host ("    {0,-18} " -f $nome) -ForegroundColor White -NoNewline
+            Write-Host ("{0,-14}" -f $badge)    -ForegroundColor $badgeColor -NoNewline
+            Write-Host (" {0}" -f $obs)         -ForegroundColor DarkGray
         }
     }
-    Write-Host "  +=============================================================+" -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -634,7 +716,23 @@ function Invoke-FastDownload {
                         $filled = [int][math]::Floor($barWidth * $percent / 100)
                         if ($filled -gt $barWidth) { $filled = $barWidth }
                         if ($filled -lt 0) { $filled = 0 }
-                        $bar = ("#" * $filled) + ("-" * ($barWidth - $filled))
+                        # Bar com bloco solido + frame parcial (semi-cheio na fronteira) + vazio leve
+                        # Resultado em Unicode: "█████▓░░░░"  (cheio - meio - vazio leve)
+                        $partial = ''
+                        $remaining = $barWidth - $filled
+                        if ($remaining -gt 0 -and $percent -lt 100) {
+                            # Calcula fracao do bloco seguinte (0-1)
+                            $frac = ($barWidth * $percent / 100) - $filled
+                            if ($frac -gt 0.66) {
+                                $partial = [string]$script:BarMid       # ▓
+                            } elseif ($frac -gt 0.33) {
+                                $partial = [string]$script:BarLow       # ▒
+                            } elseif ($frac -gt 0) {
+                                $partial = [string]$script:BarEmpty     # ░
+                            }
+                            if ($partial) { $remaining-- }
+                        }
+                        $bar = ([string]$script:BarFull * $filled) + $partial + ([string]$script:BarEmpty * $remaining)
                         $etaSec = if ($speedBps -gt 0 -and $totalBytes -gt $totalRead) { [int](($totalBytes - $totalRead) / $speedBps) } else { 0 }
                         $etaStr = "{0:D2}:{1:D2}" -f ([int]([int]$etaSec / 60)), ([int]$etaSec % 60)
                         $line = "  [{0}] {1,5:N1}% | {2,7:N2}/{3,7:N2} MB | {4,5:N1} MB/s | ETA {5}" -f $bar, $percent, $recMB, $totalMB, $speedMBs, $etaStr
@@ -3102,4 +3200,3 @@ if (-not (Confirm-Tecla "Voltar ao menu?")) {
         try { Stop-Transcript | Out-Null } catch { }
     }
 }
-  
