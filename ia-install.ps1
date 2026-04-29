@@ -103,9 +103,12 @@ if ($LogPath -or ($Silent -and -not $LogPath)) {
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.9.6"
-$SCRIPT_DATA    = "28/04/2026"
+$SCRIPT_VERSION = "2.9.9"
+$SCRIPT_DATA    = "29/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.9.9"; Data = "29/04/2026"; Descricao = "UX: cabecalho compacto sem recuo no banner" },
+    [PSCustomObject]@{ Versao = "2.9.8"; Data = "29/04/2026"; Descricao = "UX: alinha cabecalho compacto ao conceito final do remove-apps, com texto recuado e sem bordas" },
+    [PSCustomObject]@{ Versao = "2.9.7"; Data = "29/04/2026"; Descricao = "UX: banner compacto sem borda e console preferencialmente maior (140x42)" },
     [PSCustomObject]@{ Versao = "2.9.6"; Data = "28/04/2026"; Descricao = "Fix: Install-NodeJS detecta admin e cai em portable .zip (LocalAppData) quando sem privilegio" },
     [PSCustomObject]@{ Versao = "2.9.6"; Data = "28/04/2026"; Descricao = "Fix: novo helper Test-IsAdmin + Install-NodeJSPortable (.zip oficial nodejs.org)" },
     [PSCustomObject]@{ Versao = "2.9.6"; Data = "28/04/2026"; Descricao = "Fix: tenta winget --scope user antes do .zip portable (mais limpo quando disponivel)" },
@@ -443,22 +446,43 @@ function Start-Dashboard {
     $script:InstallResults  = @()
 }
 
+function Set-PreferredConsoleSize {
+    param([int]$Width = 140, [int]$Height = 42)
+
+    try {
+        $raw = $Host.UI.RawUI
+        $buffer = $raw.BufferSize
+        if ($buffer.Width -lt $Width) { $buffer.Width = $Width }
+        if ($buffer.Height -lt 3000) { $buffer.Height = 3000 }
+        $raw.BufferSize = $buffer
+
+        $max = $raw.MaxWindowSize
+        $targetWidth = [Math]::Min($Width, $max.Width)
+        $targetHeight = [Math]::Min($Height, $max.Height)
+        $window = $raw.WindowSize
+        if ($window.Width -lt $targetWidth) { $window.Width = $targetWidth }
+        if ($window.Height -lt $targetHeight) { $window.Height = $targetHeight }
+        $raw.WindowSize = $window
+    } catch { }
+}
+
 function Write-Banner {
+    Set-PreferredConsoleSize
     try { Clear-Host } catch { }
-    $v = $SCRIPT_VERSION
-    $line1 = "  ==============================================================="
     Write-Host ""
-    $hLine = ([string]$script:BoxH) * 61
-    $empty = " " * 61
-    Write-Host ("  $($script:BoxTL)$hLine$($script:BoxTR)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxV)     I A   T O O L S   I N S T A L L E R                     $($script:BoxV)") -ForegroundColor White
-    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxV)     Claude  $($script:SymBullet)  Codex  $($script:SymBullet)  OpenCode                           $($script:BoxV)") -ForegroundColor DarkCyan
-    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxV)     v{0,-6}                                                  $($script:BoxV)" -f $v) -ForegroundColor DarkGray
-    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxBL)$hLine$($script:BoxBR)") -ForegroundColor Cyan
+    Write-Host "  I A   T O O L S   I N S T A L L E R" -ForegroundColor White
+    Write-Host ("  Claude | Codex | OpenCode | v{0}" -f $SCRIPT_VERSION) -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Write-CompactHeader {
+    param([Parameter(Mandatory)][string]$Title)
+
+    Set-PreferredConsoleSize
+    try { Clear-Host } catch { }
+    Write-Host ""
+    Write-Host "  I A   T O O L S   I N S T A L L E R" -ForegroundColor White
+    Write-Host ("  {0} | v{1}" -f $Title, $SCRIPT_VERSION) -ForegroundColor DarkCyan
     Write-Host ""
 }
 
@@ -1690,10 +1714,7 @@ function Invoke-Diagnostico {
         [bool]$CheckOpenDesk   = $false
     )
 
-    Clear-Host
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "   Diagnostico do Ambiente" -ForegroundColor Cyan
-    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-CompactHeader -Title 'Diagnostico do Ambiente'
     Write-Host ""
     Write-Host "  Verificando ferramentas selecionadas..." -ForegroundColor DarkGray
     Write-Host ""
@@ -1916,10 +1937,7 @@ if ($Tudo -or $CLI -or $Desktop -or $Pacotes) {
     $acaoLabel     = if ($Remover) { 'Remover' } else { 'Instalar' }
     Write-Verbose "[NonInteractive] Modo principal automatico: $acaoLabel"
 } else {
-    Clear-Host
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "   Gerenciador de Ferramentas Dev" -ForegroundColor Cyan
-    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-CompactHeader -Title 'Menu principal'
     Write-Host ""
     Write-Host "  O que deseja fazer?" -ForegroundColor White
     Write-Host ""
@@ -1948,10 +1966,7 @@ if ($Tudo -or $CLI -or $Desktop -or $Pacotes) {
 
 # ── MODO VERSAO ───────────────────────────────────────────────
 if ($modoPrincipal -eq '9') {
-    Clear-Host
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "   Versao e Historico de Atualizacoes" -ForegroundColor Cyan
-    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-CompactHeader -Title 'Versao e Historico'
     Write-Host ""
     Write-Host "  Script  : Gerenciador de Ferramentas Dev" -ForegroundColor White
     Write-Host "  Versao  : $SCRIPT_VERSION" -ForegroundColor Green
@@ -1983,10 +1998,7 @@ if ($modoPrincipal -eq '9') {
 
 # ── MODO REMOCAO ──────────────────────────────────────────────
 if ($modoPrincipal -eq '2') {
-    Clear-Host
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "   Remover Ferramentas Dev" -ForegroundColor Cyan
-    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-CompactHeader -Title 'Remover ferramentas'
     Write-Host ""
     Write-Host "  Selecione o que deseja remover:" -ForegroundColor White
     Write-Host ""
@@ -2344,10 +2356,7 @@ pm")
 }
 
 # ── MODO INSTALACAO ───────────────────────────────────────────
-Clear-Host
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "   Instalar / Atualizar Ferramentas Dev" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
+Write-CompactHeader -Title 'Instalar / Atualizar'
 Write-Host ""
 Write-Host "  Selecione o que deseja instalar/atualizar:" -ForegroundColor White
 Write-Host ""
@@ -3371,3 +3380,5 @@ if (-not (Confirm-Tecla "Voltar ao menu?")) {
         try { Stop-Transcript | Out-Null } catch { }
     }
 }
+
+

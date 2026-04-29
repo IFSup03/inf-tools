@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Script de limpeza abrangente de arquivos temporários, caches e pastas desnecessárias.
 
@@ -15,8 +15,8 @@
     Empresa     : Infinity Brasil Ltda
     Telefone    : (34) 3301-2900
     Data criação: 2024-12-14
-    Última modif: 2025-02-12
-    Versão      : 3.7.0
+    Última modif: 2026-04-10
+    Versão      : 3.9.9
     RequerAdmin : Sim
 
 .CHANGELOG
@@ -33,8 +33,57 @@
     3.6.0 – 17/09/2025 – NOVO: Limpar-WebStorageSeletivo (Chrome/Edge) + variáveis $limparWebStorage e $diasWebStorage.
     3.6.1 – 17/09/2025 – Adicionados novos canais no Limpar-WebStorageSeletivo.
     3.6.2 – 18/09/2025 – Adequação de política: não encerrar processos; limpeza best-effort com log de bloqueios.
-    3.7.0 – 12/02/2025 – NOVO: Limpar-IndexedDB (Chrome/Edge) + variáveis $limparIndexedDB e $diasIndexedDB.
+    3.7.0 – 12/02/2026 – NOVO: Limpar-IndexedDB (Chrome/Edge) + variáveis $limparIndexedDB e $diasIndexedDB.
+    3.9.9 - 29/04/2026 - UX: banner compacto sem moldura e terminal preferencialmente maior.
+    3.9.8 - 29/04/2026 - Ajuste: Write-Log nao grava arquivo para evitar acumulo em agendador.
+    3.9.7 - 29/04/2026 - UX: autoelevacao prefere Windows Terminal/tela preta quando disponivel.
+    3.9.6 - 29/04/2026 - Fix: Console OutputEncoding protegido para hosts sem console valido.
+    3.9.5 - 29/04/2026 - Fix: reescrita limpa do Limpar-ChromeSnapshots para evitar parser error em copias.
+    3.9.4 - 29/04/2026 - Fix: Limpar-NpmCache com sintaxe conservadora PS5.1 e Write-Log nomeado.
+    3.9.3 - 29/04/2026 - Fix: reescrita limpa do Limpar-NpmCache para evitar copia truncada/parser error.
+    3.9.2 – 29/04/2026 – Fix: autoelevação usa -NoExit e wrapper de erro para evitar fechamento imediato.
+    3.9.1 – 29/04/2026 – Fix: autoelevação mais robusta e pausa final/erro em modo interativo.
+    3.9.0 – 28/04/2026 – Visual: banner/fases/resumo no padrão ia-install sem alterar escopo de limpeza.
+    3.8.0 – 10/04/2026 – Correções: $ErrorActionPreference='Stop'; log em arquivo (C:\Logs\); auto-elevação
+                         detecta PS5/PS7 automaticamente; separação pastasRelativas/pastasAbsolutas;
+                         Limpar-Adobe recebe DiasCorte como parâmetro; fix output duplicado nos jobs;
+                         Receive-Job final no NuGet paralelo.
 #>
+
+# =================== CONFIGURAÇÃO GLOBAL ===================
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference    = 'SilentlyContinue'
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+} catch {
+    # Alguns hosts/elevacoes nao possuem handle de console valido.
+}
+
+$SCRIPT_VERSION = '3.9.9'
+$SCRIPT_DATA    = '29/04/2026'
+try {
+    $script:NonInteractive = [Console]::IsInputRedirected -or (-not [Environment]::UserInteractive)
+} catch {
+    $script:NonInteractive = $false
+}
+
+function Wait-Final {
+    param([string]$Mensagem = "Pressione ENTER para fechar")
+    if ($script:NonInteractive) { return }
+    try {
+        Write-Host ""
+        Read-Host $Mensagem | Out-Null
+    } catch { }
+}
+
+$script:SymOk     = 'OK'
+$script:SymFail   = 'ERRO'
+$script:SymWarn   = 'AVISO'
+$script:SymStep   = '>'
+$script:SymInfo   = 'INFO'
+$script:BoxTL = '+'; $script:BoxTR = '+'; $script:BoxBL = '+'; $script:BoxBR = '+'
+$script:BoxH = '-';  $script:BoxV = '|'
 
 # =================== VARIÁVEIS CONFIGURÁVEIS ===================
 
@@ -101,8 +150,8 @@ $caminhosBrowsers = @(
     "C:\Users\*\AppData\local\Mozilla\Firefox\Profiles\*\cache2\*.log"
 )
 
-# Pastas comuns dentro dos perfis de usuários que devem ser limpas
-$pastasComuns = @(
+# Pastas relativas ao perfil de cada usuário (serão combinadas com C:\Users\<usuario>\)
+$pastasRelativas = @(
     "AppData\Local\Microsoft\Terminal Server Client\Cache\",
     "AppData\Local\Microsoft\Windows\Explorer\",
     "AppData\Local\Microsoft\Windows\INetCache\",
@@ -110,9 +159,11 @@ $pastasComuns = @(
     "AppData\Roaming\Code\Cache\",
     "AppData\Roaming\Code\CachedData\",
     "AppData\Roaming\Code\CachedExtensionVSIXs\",
-    "AppData\Local\Temp\",
+    "AppData\Local\Temp\"
+)
 
-    # Teams
+# Caminhos absolutos com wildcard para pastas de aplicativos (Teams, etc.)
+$pastasAbsolutas = @(
     "C:\Users\*\AppData\Roaming\Microsoft\Teams\Service Worker\*",
     "C:\Users\*\AppData\Roaming\Microsoft\Teams\Partitions\msa\Service Worker\*",
     "C:\Users\*\AppData\Roaming\Microsoft\Teams\Partitions\msa\Cache\*",
@@ -136,9 +187,94 @@ if ($RequerAdmin -notin @("sim", "não")) {
 if ($RequerAdmin -eq "sim") {
     $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Write-Host "O script precisa ser executado como Administrador. Solicitando elevação..."
-        Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-        exit
+        Write-Host "O script precisa ser executado como Administrador. Solicitando elevacao..." -ForegroundColor Yellow
+
+        $cmdPath = $PSCommandPath
+        if (-not $cmdPath) { $cmdPath = $MyInvocation.PSCommandPath }
+        if (-not $cmdPath) { $cmdPath = $MyInvocation.MyCommand.Path }
+
+        if (-not ($cmdPath -and (Test-Path -LiteralPath $cmdPath))) {
+            Write-Host "Nao foi possivel localizar o arquivo do script para elevar." -ForegroundColor Red
+            Wait-Final
+            exit 1
+        }
+
+        try {
+            $shellPath = "powershell.exe"
+            try {
+                $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+                if ($pwsh) { $shellPath = $pwsh.Source }
+            } catch { }
+
+            $wtPath = $null
+            if (-not $script:NonInteractive) {
+                try {
+                    $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
+                    if ($wt) { $wtPath = $wt.Source }
+                } catch { }
+
+                if (-not $wtPath) {
+                    $wtCandidate = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\wt.exe"
+                    if (Test-Path -LiteralPath $wtCandidate) { $wtPath = $wtCandidate }
+                }
+            }
+
+            $escapedPath = $cmdPath.Replace("'", "''")
+            $command = @"
+try {
+    try {
+        `$Host.UI.RawUI.BackgroundColor = 'Black'
+        `$Host.UI.RawUI.ForegroundColor = 'White'
+        `$raw = `$Host.UI.RawUI
+        `$buffer = `$raw.BufferSize
+        if (`$buffer.Width -lt 140) { `$buffer.Width = 140 }
+        if (`$buffer.Height -lt 3000) { `$buffer.Height = 3000 }
+        `$raw.BufferSize = `$buffer
+        `$window = `$raw.WindowSize
+        if (`$window.Width -lt 140) { `$window.Width = 140 }
+        if (`$window.Height -lt 42) { `$window.Height = 42 }
+        `$raw.WindowSize = `$window
+        Clear-Host
+    } catch { }
+    & '$escapedPath'
+} catch {
+    Write-Host ''
+    Write-Host ('ERRO: ' + `$_.Exception.Message) -ForegroundColor Red
+    Write-Host ('Linha: ' + `$_.InvocationInfo.ScriptLineNumber) -ForegroundColor Red
+}
+"@
+
+            if ($wtPath) {
+                $wtArgs = @(
+                    '-w', '-1',
+                    '--size', '140,42',
+                    'new-tab',
+                    '--title', 'delete-temp-files',
+                    '--suppressApplicationTitle',
+                    '--',
+                    $shellPath,
+                    '-NoExit',
+                    '-NoProfile',
+                    '-ExecutionPolicy', 'Bypass',
+                    '-Command', $command
+                )
+                Start-Process -FilePath $wtPath -Verb RunAs -ArgumentList $wtArgs -ErrorAction Stop | Out-Null
+            } else {
+                $argList = @(
+                    '-NoExit',
+                    '-NoProfile',
+                    '-ExecutionPolicy', 'Bypass',
+                    '-Command', $command
+                )
+                Start-Process -FilePath $shellPath -Verb RunAs -ArgumentList $argList -ErrorAction Stop | Out-Null
+            }
+
+            exit 0
+        } catch {
+            Write-Host "Elevacao cancelada ou falhou: $($_.Exception.Message)" -ForegroundColor Red
+            Wait-Final
+            exit 1
+        }
     }
 }
 
@@ -162,6 +298,8 @@ if ($limparIndexedDB -notin @("sim", "não")) {
     exit 1
 }
 
+
+
 # =================== FUNÇÃO DE LOG ===================
 
 function Write-Log {
@@ -173,20 +311,134 @@ function Write-Log {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $msg = "$timestamp [$Level] $Message"
     Write-Host $msg
-    # Aqui pode ser implementado registro em arquivo de log, se necessário
+}
+
+# =================== FUNCOES DE INTERFACE ===================
+
+function Write-Step  { param($msg) Write-Host ("  {0} {1}" -f $script:SymStep, $msg) -ForegroundColor Cyan }
+function Write-Ok    { param($msg) Write-Host ("  {0} {1}" -f $script:SymOk,   $msg) -ForegroundColor Green }
+function Write-Warn  { param($msg) Write-Host ("  {0} {1}" -f $script:SymWarn, $msg) -ForegroundColor Yellow }
+function Write-Fail  { param($msg) Write-Host ("  {0} {1}" -f $script:SymFail, $msg) -ForegroundColor Red }
+function Write-Info  { param($msg) Write-Host ("  {0} {1}" -f $script:SymInfo, $msg) -ForegroundColor Gray }
+
+$script:CleanResults = @()
+$script:ScriptStartTime = $null
+
+function Add-CleanResult {
+    param(
+        [string]$Categoria,
+        [string]$Alvo,
+        [ValidateSet("OK", "PULADO", "FALHOU")]
+        [string]$Status,
+        [string]$Obs = ''
+    )
+    $script:CleanResults += [PSCustomObject]@{
+        Categoria = $Categoria
+        Alvo      = $Alvo
+        Status    = $Status
+        Obs       = $Obs
+    }
+}
+
+function Show-Summary {
+    $elapsedSpan = if ($script:ScriptStartTime) { (Get-Date) - $script:ScriptStartTime } else { [TimeSpan]::Zero }
+    $elapsedStr = if ($elapsedSpan.TotalMinutes -ge 1) {
+        "{0}m {1}s" -f [int]$elapsedSpan.TotalMinutes, $elapsedSpan.Seconds
+    } else {
+        "{0}s" -f [int]$elapsedSpan.TotalSeconds
+    }
+
+    $ok   = @($script:CleanResults | Where-Object { $_.Status -eq "OK" }).Count
+    $skip = @($script:CleanResults | Where-Object { $_.Status -eq "PULADO" }).Count
+    $fail = @($script:CleanResults | Where-Object { $_.Status -eq "FALHOU" }).Count
+    $headerColor = if ($fail -gt 0) { "Red" } else { "Green" }
+    $headerLabel = if ($fail -gt 0) { "CONCLUIDO COM FALHAS" } else { "LIMPEZA CONCLUIDA" }
+
+    $hLine = ([string]$script:BoxH) * 61
+    Write-Host ""
+    Write-Host ("  $($script:BoxTL)$hLine$($script:BoxTR)") -ForegroundColor Cyan
+    $linha1 = "  RESUMO  (tempo total: $elapsedStr)".PadRight(61)
+    Write-Host ("  $($script:BoxV)$linha1$($script:BoxV)") -ForegroundColor White
+    $linha2 = "  - $headerLabel  ($ok ok / $skip pulados / $fail falhas)".PadRight(61)
+    if ($linha2.Length -gt 61) { $linha2 = $linha2.Substring(0, 61) }
+    Write-Host ("  $($script:BoxV)$linha2$($script:BoxV)") -ForegroundColor $headerColor
+    Write-Host ("  $($script:BoxBL)$hLine$($script:BoxBR)") -ForegroundColor Cyan
+
+    foreach ($r in $script:CleanResults) {
+        $cor = if ($r.Status -eq "OK") { "Green" } elseif ($r.Status -eq "PULADO") { "DarkGray" } else { "Red" }
+        $obs = if ($r.Obs) { " $($r.Obs)" } else { "" }
+        Write-Host ("    {0,-18} {1,-34} [{2}]{3}" -f $r.Categoria, $r.Alvo, $r.Status, $obs) -ForegroundColor $cor
+    }
+    Write-Host ""
+}
+
+function Set-PreferredConsoleSize {
+    param([int]$Width = 140, [int]$Height = 42)
+
+    try {
+        $raw = $Host.UI.RawUI
+        $buffer = $raw.BufferSize
+        if ($buffer.Width -lt $Width) { $buffer.Width = $Width }
+        if ($buffer.Height -lt 3000) { $buffer.Height = 3000 }
+        $raw.BufferSize = $buffer
+
+        $max = $raw.MaxWindowSize
+        $targetWidth = [Math]::Min($Width, $max.Width)
+        $targetHeight = [Math]::Min($Height, $max.Height)
+        $window = $raw.WindowSize
+        if ($window.Width -lt $targetWidth) { $window.Width = $targetWidth }
+        if ($window.Height -lt $targetHeight) { $window.Height = $targetHeight }
+        $raw.WindowSize = $window
+    } catch { }
+}
+
+function Write-Banner {
+    Set-PreferredConsoleSize
+    try { Clear-Host } catch { }
+    Write-Host ""
+    Write-Host "  D E L E T E - T E M P - F I L E S" -ForegroundColor White
+    Write-Host ("  Limpeza de temporarios, caches e downloads | v{0}" -f $SCRIPT_VERSION) -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Write-Phase {
+    param([string]$Title)
+    $hLine = ([string]$script:BoxH) * 59
+    $titleLine = $Title.PadRight(58)
+    if ($titleLine.Length -gt 58) { $titleLine = $titleLine.Substring(0,58) }
+    Write-Host ""
+    Write-Host ("  $($script:BoxTL)$hLine$($script:BoxTR)") -ForegroundColor DarkCyan
+    Write-Host ("  $($script:BoxV) {0} $($script:BoxV)" -f $titleLine) -ForegroundColor Cyan
+    Write-Host ("  $($script:BoxBL)$hLine$($script:BoxBR)") -ForegroundColor DarkCyan
+}
+
+function Confirm-Tecla {
+    param([string]$Mensagem)
+    if ($script:NonInteractive) { return $true }
+
+    Write-Host "  $Mensagem [ENTER = sim | ESC = nao] " -ForegroundColor White -NoNewline
+    while ($true) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq 'Enter') { Write-Host "Sim" -ForegroundColor Green; return $true }
+        if ($key.Key -eq 'Escape') { Write-Host "Nao" -ForegroundColor Gray; return $false }
+    }
+}
+
+function Confirm-VoltarMenu {
+    if ($script:NonInteractive) { return $false }
+
+    Write-Host ""
+    Write-Host "  O que deseja fazer agora? [ENTER = voltar ao menu | ESC = sair] " -ForegroundColor White -NoNewline
+    while ($true) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq 'Enter') { Write-Host "Voltar ao menu" -ForegroundColor Cyan; return $true }
+        if ($key.Key -eq 'Escape') { Write-Host "Sair" -ForegroundColor Yellow; return $false }
+    }
 }
 
 # =================== FUNÇÃO: MANTER APENAS N SNAPSHOTS (CHROME/EDGE) ===================
 
 function Limpar-ChromeSnapshots {
-    <#
-        .SYNOPSIS
-            Mantém apenas N snapshots mais recentes do Chrome/Edge por usuário e canal.
-        .PARAMETER Manter
-            Quantidade de snapshots a manter (default = 1).
-        .PARAMETER Paralelo
-            Quando presente, executa em jobs paralelos.
-    #>
     param(
         [int]$Manter = 1,
         [switch]$Paralelo
@@ -194,85 +446,91 @@ function Limpar-ChromeSnapshots {
 
     if ($Manter -lt 0) { $Manter = 0 }
 
-    Write-Log "Iniciando limpeza de Snapshots (manter = $Manter)" "INFO"
+    Write-Log -Message ("Iniciando limpeza de Snapshots Chrome Edge. Manter {0}" -f $Manter) -Level "INFO"
 
     $canais = @(
-        @{ Nome = "Chrome";        Base = "Google\Chrome" }
-        @{ Nome = "Chrome Beta";   Base = "Google\Chrome Beta" }
-        @{ Nome = "Chrome Dev";    Base = "Google\Chrome Dev" }
-        @{ Nome = "Chrome Canary"; Base = "Google\Chrome SxS" }
-        @{ Nome = "Edge";          Base = "Microsoft\Edge" }
+        [PSCustomObject]@{ Nome = "Chrome";        Base = "Google\Chrome" },
+        [PSCustomObject]@{ Nome = "Chrome Beta";   Base = "Google\Chrome Beta" },
+        [PSCustomObject]@{ Nome = "Chrome Dev";    Base = "Google\Chrome Dev" },
+        [PSCustomObject]@{ Nome = "Chrome Canary"; Base = "Google\Chrome SxS" },
+        [PSCustomObject]@{ Nome = "Edge";          Base = "Microsoft\Edge" }
     )
 
-    $userFolders = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue
-    $jobs = @()
+    $userFolders = Get-ChildItem -LiteralPath "C:\Users" -Directory -ErrorAction SilentlyContinue
 
-    $sb = {
-        param($snapPath, $manter, $canal, $usuario)
+    $snapshotScript = {
+        param(
+            [string]$SnapPath,
+            [int]$KeepCount,
+            [string]$BrowserName,
+            [string]$UserName
+        )
 
         try {
-            if (-not (Test-Path $snapPath)) {
-                Write-Output "[$usuario][$canal] Pasta nao encontrada: $snapPath"
+            if (-not (Test-Path -LiteralPath $SnapPath)) {
+                Write-Output ("[{0}][{1}] Pasta nao encontrada: {2}" -f $UserName, $BrowserName, $SnapPath)
                 return
             }
 
-            # Pastas de snapshot ordenadas do mais novo para o mais antigo
-            $dirs = Get-ChildItem -Path $snapPath -Directory -ErrorAction SilentlyContinue |
+            $dirs = Get-ChildItem -LiteralPath $SnapPath -Directory -ErrorAction SilentlyContinue |
                     Sort-Object LastWriteTime -Descending
 
-            if (-not $dirs -or $dirs.Count -le $manter) {
-                Write-Output "[$usuario][$canal] Nada para excluir (pastas: $($dirs.Count))"
+            if (-not $dirs -or $dirs.Count -le $KeepCount) {
+                Write-Output ("[{0}][{1}] Nada para excluir em {2}" -f $UserName, $BrowserName, $SnapPath)
                 return
             }
 
-            $keep = $dirs | Select-Object -First $manter
-            $del  = $dirs | Select-Object -Skip $manter
+            $keep = @($dirs | Select-Object -First $KeepCount)
+            $delete = @($dirs | Select-Object -Skip $KeepCount)
 
-            foreach ($d in $del) {
+            foreach ($dir in $delete) {
                 try {
-                    Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop
-                    Write-Output "[$usuario][$canal] Excluido snapshot: $($d.Name)"
+                    Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+                    Write-Output ("[{0}][{1}] Snapshot excluido: {2}" -f $UserName, $BrowserName, $dir.Name)
                 } catch {
-                    Write-Output "[$usuario][$canal] Falha ao excluir $($d.FullName): $($_.Exception.Message)"
+                    Write-Output ("[{0}][{1}] Falha ao excluir {2}: {3}" -f $UserName, $BrowserName, $dir.FullName, $_.Exception.Message)
                 }
             }
 
-            $keptNames = ($keep | ForEach-Object Name) -join ', '
-            Write-Output "[$usuario][$canal] Mantido(s): $keptNames"
-        }
-        catch {
-            Write-Output "[$usuario][$canal] Erro ao processar $snapPath — $($_.Exception.Message)"
+            $keptNames = ($keep | ForEach-Object { $_.Name }) -join ", "
+            Write-Output ("[{0}][{1}] Mantido: {2}" -f $UserName, $BrowserName, $keptNames)
+        } catch {
+            Write-Output ("[{0}][{1}] Erro ao processar {2}: {3}" -f $UserName, $BrowserName, $SnapPath, $_.Exception.Message)
         }
     }
+
+    $jobs = @()
 
     foreach ($user in $userFolders) {
         foreach ($canal in $canais) {
-            $snapPath = Join-Path $user.FullName ("AppData\Local\{0}\User Data\Snapshots" -f $canal.Base)
+            $relativePath = "AppData\Local\{0}\User Data\Snapshots" -f $canal.Base
+            $snapPath = Join-Path -Path $user.FullName -ChildPath $relativePath
+
             if ($Paralelo) {
-                $jobs += Start-Job -ScriptBlock $sb -ArgumentList $snapPath, $Manter, $canal.Nome, $user.Name
+                $jobs += Start-Job -ScriptBlock $snapshotScript -ArgumentList $snapPath, $Manter, $canal.Nome, $user.Name
             } else {
-                $out = & $sb $snapPath $Manter $canal.Nome $user.Name
-                foreach ($line in $out) { Write-Log $line "INFO" }
+                $out = & $snapshotScript $snapPath $Manter $canal.Nome $user.Name
+                foreach ($line in $out) {
+                    Write-Log -Message $line -Level "INFO"
+                }
             }
         }
     }
 
-    if ($Paralelo -and $jobs) {
-        while ($jobs.State -contains 'Running') {
-            foreach ($job in $jobs) {
-                $out = Receive-Job -Job $job -Keep
-                foreach ($line in $out) { Write-Host $line }
-            }
-            Start-Sleep 1
-        }
+    if ($Paralelo -and $jobs.Count -gt 0) {
+        $jobs | Wait-Job | Out-Null
+
         foreach ($job in $jobs) {
-            $out = Receive-Job -Job $job
-            foreach ($line in $out) { Write-Host $line }
+            $out = Receive-Job -Job $job -ErrorAction SilentlyContinue
+            foreach ($line in $out) {
+                Write-Log -Message $line -Level "INFO"
+            }
         }
-        $jobs | Remove-Job
+
+        $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
     }
 
-    Write-Log "Limpeza de Snapshots do Chrome/Edge finalizada" "INFO"
+    Write-Log -Message "Limpeza de Snapshots Chrome Edge finalizada" -Level "INFO"
 }
 
 # =================== FUNÇÃO: LIMPAR CACHE NUGET ===================
@@ -326,6 +584,10 @@ function Limpar-NuGetCaches {
             }
             Start-Sleep 1
         }
+        foreach ($job in $jobs) {
+            $output = Receive-Job -Job $job
+            foreach ($linha in $output) { Write-Host $linha }
+        }
         $jobs | Remove-Job
     }
 
@@ -337,76 +599,102 @@ function Limpar-NuGetCaches {
 function Limpar-NpmCache {
     param([switch]$Paralelo)
 
-    Write-Log "Iniciando limpeza do npm-cache em todos os perfis (sem encerrar processos)" "INFO"
+    Write-Log -Message "Iniciando limpeza do npm cache em todos os perfis sem encerrar processos" -Level "INFO"
 
-    $npmExe = (Get-Command npm -ErrorAction SilentlyContinue).Source   # global npm
-    if (-not $npmExe) {
-        Write-Log "npm.exe nao encontrado no PATH; farei so a limpeza fisica." "WARN"
+    $npmExe = $null
+    try {
+        $cmdNpm = Get-Command npm -ErrorAction SilentlyContinue
+        if ($cmdNpm) { $npmExe = $cmdNpm.Source }
+    } catch {
+        $npmExe = $null
     }
 
-    $userFolders = Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue
+    if (-not $npmExe) {
+        Write-Log -Message "npm.exe nao encontrado no PATH. Sera feita somente a limpeza fisica." -Level "WARN"
+    }
 
-    # 1) LIMPAR CONTEÚDO — pode ser em paralelo
-    $cleanJobs = @()
-    $cleanSB   = {
-        param($cache)
+    $userFolders = Get-ChildItem -LiteralPath "C:\Users" -Directory -ErrorAction SilentlyContinue
+    $cachePaths = @()
 
-        if (-not (Test-Path $cache)) {
-            New-Item -ItemType Directory -Path $cache -Force | Out-Null
-        }
+    foreach ($user in $userFolders) {
+        $cachePaths += Join-Path -Path $user.FullName -ChildPath "AppData\Local\npm-cache"
+        $cachePaths += Join-Path -Path $user.FullName -ChildPath "AppData\Roaming\npm-cache"
+    }
 
-        # Ajusta permissões, mas não encerra processos
-        icacls $cache /grant "*S-1-5-32-544:(OI)(CI)(F)" /T /C | Out-Null
+    $cleanScript = {
+        param([string]$CachePath)
 
         try {
-            Get-ChildItem -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue `
-                | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $CachePath)) {
+                New-Item -ItemType Directory -Path $CachePath -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+
+            try {
+                & icacls.exe $CachePath /grant "*S-1-5-32-544:(OI)(CI)(F)" /T /C | Out-Null
+            } catch {
+                Write-Output ("Aviso ao ajustar permissoes em {0}: {1}" -f $CachePath, $_.Exception.Message)
+            }
+
+            $items = Get-ChildItem -LiteralPath $CachePath -Recurse -Force -ErrorAction SilentlyContinue
+            foreach ($item in $items) {
+                Remove-Item -LiteralPath $item.FullName -Force -Recurse -ErrorAction SilentlyContinue
+            }
+
+            Write-Output ("npm cache limpo em {0}" -f $CachePath)
         } catch {
-            Write-Output "Falha ao limpar $cache (possivel lock): $($_.Exception.Message)"
+            Write-Output ("Falha ao limpar {0}: {1}" -f $CachePath, $_.Exception.Message)
         }
     }
 
-    foreach ($u in $userFolders) {
-        foreach ($c in @(
-            (Join-Path $u.FullName 'AppData\Local\npm-cache'),
-            (Join-Path $u.FullName 'AppData\Roaming\npm-cache')
-        )) {
-            if ($Paralelo) {
-                $cleanJobs += Start-Job -ScriptBlock $cleanSB -ArgumentList $c
-            } else {
-                & $cleanSB $c
+    $jobs = @()
+    foreach ($cachePath in $cachePaths) {
+        if ($Paralelo) {
+            $jobs += Start-Job -ScriptBlock $cleanScript -ArgumentList $cachePath
+        } else {
+            $out = & $cleanScript $cachePath
+            foreach ($line in $out) {
+                if ($line -like "Falha*") {
+                    Write-Log -Message $line -Level "WARN"
+                } else {
+                    Write-Log -Message $line -Level "INFO"
+                }
             }
         }
     }
 
-    if ($Paralelo -and $cleanJobs) {
-        $cleanJobs | Wait-Job | Out-Null
-        $cleanJobs | Remove-Job
+    if ($Paralelo -and $jobs.Count -gt 0) {
+        $jobs | Wait-Job | Out-Null
+
+        foreach ($job in $jobs) {
+            $out = Receive-Job -Job $job -ErrorAction SilentlyContinue
+            foreach ($line in $out) {
+                if ($line -like "Falha*") {
+                    Write-Log -Message $line -Level "WARN"
+                } else {
+                    Write-Log -Message $line -Level "INFO"
+                }
+            }
+        }
+
+        $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
     }
 
-    # 2) VERIFICAR E RECONSTRUIR — sem encerrar nada
     if ($npmExe) {
-        foreach ($u in $userFolders) {
-            foreach ($c in @(
-                (Join-Path $u.FullName 'AppData\Local\npm-cache'),
-                (Join-Path $u.FullName 'AppData\Roaming\npm-cache')
-            )) {
-                if (-not (Test-Path $c)) { continue }
+        foreach ($cachePath in $cachePaths) {
+            if (-not (Test-Path -LiteralPath $cachePath)) { continue }
 
-                try {
-                    & $npmExe cache verify --cache "$c" --silent *> $null
-                    if ($LASTEXITCODE -ne 0) {
-                        Write-Log "npm verify retornou codigo $LASTEXITCODE em $c (possivel lock). Continuacao sem erro fatal." "WARN"
-                    }
+            try {
+                & $npmExe cache verify --cache "$cachePath" --silent 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Log -Message ("npm verify retornou codigo {0} em {1}" -f $LASTEXITCODE, $cachePath) -Level "WARN"
                 }
-                catch {
-                    Write-Log "Erro no npm verify para $c — $($_.Exception.Message)" "WARN"
-                }
+            } catch {
+                Write-Log -Message ("Erro no npm verify para {0}: {1}" -f $cachePath, $_.Exception.Message) -Level "WARN"
             }
         }
     }
 
-    Write-Log "Limpeza e verificacao do npm-cache concluidas (best-effort, sem encerrar processos)" "INFO"
+    Write-Log -Message "Limpeza e verificacao do npm cache concluidas" -Level "INFO"
 }
 
 # =================== FUNÇÃO: LIMPAR WEBSTORAGE SELETIVO (sem encerrar processos) ===================
@@ -649,14 +937,15 @@ function Limpar-IndexedDB {
 
 function Limpar-Adobe {
     param (
-        [string]$caminhoAdobe
+        [string]$caminhoAdobe,
+        [int]$DiasCorte = 30
     )
     if (-not (Test-Path $caminhoAdobe)) {
         return
     }
     Write-Log "Iniciando limpeza da pasta Adobe: $caminhoAdobe" "INFO"
 
-    $dataLimite = (Get-Date).AddDays(-$dataDeCorteAdobe)
+    $dataLimite = (Get-Date).AddDays(-$DiasCorte)
 
     $arquivos = Get-ChildItem -Path $caminhoAdobe -File -Recurse -ErrorAction SilentlyContinue
     foreach ($arquivo in $arquivos) {
@@ -737,7 +1026,8 @@ function Limpar-PastaJob {
 
 function Limpar-TemporariosEdownloads {
     param (
-        [array]$pastasComuns,
+        [array]$pastasRelativas,
+        [array]$pastasAbsolutas,
         [array]$pastasSistema,
         [int]$diasDownloads,
         [array]$naoExcluirDownloads
@@ -746,12 +1036,20 @@ function Limpar-TemporariosEdownloads {
 
     $userFolders = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue
 
-    # Criar jobs para limpar pastas comuns de cada usuário
+    # Criar jobs para limpar pastas relativas de cada usuário
     $jobs = @()
     foreach ($userFolder in $userFolders) {
-        foreach ($folder in $pastasComuns) {
+        foreach ($folder in $pastasRelativas) {
             $fullPath = Join-Path $userFolder.FullName $folder
             $jobs += Start-Job -ScriptBlock ${function:Limpar-PastaJob} -ArgumentList $fullPath
+        }
+    }
+
+    # Criar jobs para limpar pastas absolutas (wildcards expandidos manualmente)
+    foreach ($pattern in $pastasAbsolutas) {
+        $resolved = Get-Item -Path $pattern -ErrorAction SilentlyContinue
+        foreach ($item in $resolved) {
+            $jobs += Start-Job -ScriptBlock ${function:Limpar-PastaJob} -ArgumentList $item.FullName
         }
     }
 
@@ -760,13 +1058,15 @@ function Limpar-TemporariosEdownloads {
         $jobs += Start-Job -ScriptBlock ${function:Limpar-PastaJob} -ArgumentList $folder
     }
 
-    # Monitorar e exibir progresso dos jobs em tempo real
+    # Monitorar e exibir progresso dos jobs sem duplicar linhas
+    $printed = @{}
     while ($jobs.State -contains 'Running') {
         foreach ($job in $jobs) {
             $output = Receive-Job -Job $job -Keep
-            foreach ($linha in $output) {
-                Write-Host $linha
-            }
+            $already = $printed[$job.Id]
+            $new = if ($already) { $output | Select-Object -Skip $already } else { $output }
+            foreach ($linha in $new) { Write-Host $linha }
+            $printed[$job.Id] = $output.Count
         }
         Start-Sleep -Seconds 1
     }
@@ -841,39 +1141,67 @@ function Limpar-Insomnia {
 # =================== BLOCO PRINCIPAL ===================
 
 try {
+    $script:ScriptStartTime = Get-Date
+    Write-Banner
     Write-Log "========================================" "INFO"
-    Write-Log "Script de Limpeza de Sistema v3.7.0" "INFO"
+    Write-Log "Script de Limpeza de Sistema v$SCRIPT_VERSION" "INFO"
     Write-Log "========================================" "INFO"
-    
-    if ($limparNuGetCache -eq "sim") { Limpar-NuGetCaches -Paralelo }
-    if ($limparNpmCache  -eq "sim") { Limpar-NpmCache -Paralelo }
 
-    # Manter só N snapshots mais recentes por canal (Chrome/Edge)
+    if ($limparNuGetCache -eq "sim") {
+        Write-Phase "Cache NuGet"
+        Limpar-NuGetCaches -Paralelo
+        Add-CleanResult -Categoria "NuGet" -Alvo "Cache global" -Status "OK"
+    }
+    if ($limparNpmCache -eq "sim") {
+        Write-Phase "Cache npm"
+        Limpar-NpmCache -Paralelo
+        Add-CleanResult -Categoria "npm" -Alvo "Cache por perfil" -Status "OK"
+    }
+
+    Write-Phase "Snapshots Chrome/Edge"
     Limpar-ChromeSnapshots -Manter $manterSnapshots -Paralelo
+    Add-CleanResult -Categoria "Chrome/Edge" -Alvo "Snapshots" -Status "OK" -Obs "manter $manterSnapshots"
 
-    # Manter WebStorage apenas dos últimos N dias (sem encerrar processos)
     if ($limparWebStorage -eq "sim") {
+        Write-Phase "WebStorage Chrome/Edge"
         Limpar-WebStorageSeletivo -Dias $diasWebStorage -Paralelo
+        Add-CleanResult -Categoria "Chrome/Edge" -Alvo "WebStorage" -Status "OK" -Obs "$diasWebStorage dia(s)"
     }
 
-    # NOVO v3.7.0: Manter IndexedDB apenas dos últimos N dias (sem encerrar processos)
     if ($limparIndexedDB -eq "sim") {
+        Write-Phase "IndexedDB Chrome/Edge"
         Limpar-IndexedDB -Dias $diasIndexedDB -Paralelo
+        Add-CleanResult -Categoria "Chrome/Edge" -Alvo "IndexedDB" -Status "OK" -Obs "$diasIndexedDB dia(s)"
     }
 
+    Write-Phase "Aplicativos e caches locais"
     Limpar-Insomnia
-    Limpar-Adobe -caminhoAdobe "C:\ProgramData\Adobe\ARM"
+    Add-CleanResult -Categoria "Insomnia" -Alvo "Versoes antigas" -Status "OK"
+
+    Write-Phase "Adobe e navegadores"
+    Limpar-Adobe -caminhoAdobe "C:\ProgramData\Adobe\ARM" -DiasCorte $dataDeCorteAdobe
+    Add-CleanResult -Categoria "Adobe" -Alvo "ARM" -Status "OK" -Obs "$dataDeCorteAdobe dia(s)"
     Limpar-CachesBrowsers -caminhos $caminhosBrowsers
-    Limpar-TemporariosEdownloads -pastasComuns $pastasComuns `
+    Add-CleanResult -Categoria "Navegadores" -Alvo "Caches" -Status "OK"
+
+    Write-Phase "Temporarios e Downloads"
+    Limpar-TemporariosEdownloads -pastasRelativas $pastasRelativas `
+                                 -pastasAbsolutas $pastasAbsolutas `
                                  -pastasSistema $pastasSistema `
                                  -diasDownloads $diasDownloads `
                                  -naoExcluirDownloads $naoExcluirDownloads
+    Add-CleanResult -Categoria "Sistema" -Alvo "Temp/Downloads" -Status "OK" -Obs "$diasDownloads dia(s)"
 
+    Show-Summary
     Write-Log "========================================" "INFO"
     Write-Log "Limpeza concluida com sucesso!" "INFO"
     Write-Log "========================================" "INFO"
+    Wait-Final
 }
 catch {
+    Add-CleanResult -Categoria "Geral" -Alvo "Execucao" -Status "FALHOU" -Obs $_.Exception.Message
+    Show-Summary
     Write-Log "Erro inesperado durante a execucao do script: $_" "ERROR"
+    Wait-Final
     throw
 }

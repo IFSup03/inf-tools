@@ -16,9 +16,9 @@
 
 .PARAMETER Apps
     Lista de categorias a remover. Aceita:
-    Xbox, Outlook, OneDrive, Padrao, Cortana, Midia, Copilot, Office,
-    Outros, StickyNotes, Multimidia, Consumer, Teams, Clipchamp,
-    News, Family
+    Xbox, Outlook, OneDrive, Teams, Copilot, Cortana, Office, Comunicacao,
+    Midia, MapasClima, Utilitarios, FeedbackDicas, Suporte, Jogos,
+    Consumer, Clipchamp, News, Family, PowerAutomate, PowerBI, Codecs
 
 .PARAMETER Tudo
     Remove todas as categorias listadas no catalogo.
@@ -56,16 +56,16 @@
 
 .NOTES
     Autor       : Victor Hugo Gomides (refatorado em 2026)
-    Versao      : 2.0.2
+    Versao      : 2.1.4
     Compatibilidade : Windows 10/11, Server 2016+, PowerShell 5.1+
     RequerAdmin : sim
 #>
 [CmdletBinding(DefaultParameterSetName='Interactive', SupportsShouldProcess=$true)]
 param(
     [Parameter(ParameterSetName='Apps')]
-    [ValidateSet('Xbox','Outlook','OneDrive','Padrao','Cortana','Midia','Copilot',
-                 'Office','Outros','StickyNotes','Multimidia','Consumer','Teams',
-                 'Clipchamp','News','Family')]
+    [ValidateSet('Xbox','Outlook','OneDrive','Teams','Copilot','Cortana','Office','Comunicacao',
+                 'Midia','MapasClima','Utilitarios','FeedbackDicas','Suporte','Jogos',
+                 'Consumer','Clipchamp','News','Family','PowerAutomate','PowerBI','Codecs')]
     [string[]]$Apps,
 
     [Parameter(ParameterSetName='Tudo')]
@@ -82,9 +82,27 @@ $ErrorActionPreference = "Continue"
 # ----------------------------------------------------------
 # Versao e historico
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.0.2"
-$SCRIPT_DATA    = "28/04/2026"
+$SCRIPT_VERSION = "2.1.17"
+$SCRIPT_DATA    = "29/04/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.1.17"; Data = "29/04/2026"; Descricao = "UX: cabecalho compacto sem recuo no banner" },
+    [PSCustomObject]@{ Versao = "2.1.16"; Data = "29/04/2026"; Descricao = "UX: mostra informacao do sistema apenas no menu inicial" },
+    [PSCustomObject]@{ Versao = "2.1.15"; Data = "29/04/2026"; Descricao = "UX: remove bordas do banner e usa cabecalho compacto recuado" },
+    [PSCustomObject]@{ Versao = "2.1.14"; Data = "29/04/2026"; Descricao = "UX: abre terminal elevado maior para manter banner e menu visiveis" },
+    [PSCustomObject]@{ Versao = "2.1.13"; Data = "29/04/2026"; Descricao = "UX: usa cabecalho compacto no menu de categorias para manter REMOVE-APPS visivel" },
+    [PSCustomObject]@{ Versao = "2.1.12"; Data = "29/04/2026"; Descricao = "UX: redesenha banner REMOVE-APPS ao voltar da categoria para o menu" },
+    [PSCustomObject]@{ Versao = "2.1.11"; Data = "29/04/2026"; Descricao = "UX: remove opcao 0 redundante no menu de categorias; ESC sai" },
+    [PSCustomObject]@{ Versao = "2.1.10"; Data = "29/04/2026"; Descricao = "UX: simplifica frase do prompt no menu de categorias" },
+    [PSCustomObject]@{ Versao = "2.1.9"; Data = "29/04/2026"; Descricao = "UX: simplifica frase do prompt no submenu de itens" },
+    [PSCustomObject]@{ Versao = "2.1.8"; Data = "29/04/2026"; Descricao = "UX: remove opcao 0 redundante no submenu de itens; ESC volta a categoria" },
+    [PSCustomObject]@{ Versao = "2.1.7"; Data = "29/04/2026"; Descricao = "UX: limpa a tela ao entrar em uma categoria e mostra apenas os itens dela" },
+    [PSCustomObject]@{ Versao = "2.1.6"; Data = "29/04/2026"; Descricao = "Fix: se todas as categorias forem puladas, volta ao menu em vez de encerrar" },
+    [PSCustomObject]@{ Versao = "2.1.5"; Data = "29/04/2026"; Descricao = "Fix: opcao 0 dentro da categoria pula a categoria sem encerrar o script" },
+    [PSCustomObject]@{ Versao = "2.1.4"; Data = "28/04/2026"; Descricao = "Catalogo: reorganiza categorias por risco/uso e separa PowerBI, PowerAutomate, Suporte, MapasClima e Jogos" },
+    [PSCustomObject]@{ Versao = "2.1.3"; Data = "28/04/2026"; Descricao = "UX: menu de itens mostra nome amigavel do app junto do identificador tecnico Appx" },
+    [PSCustomObject]@{ Versao = "2.1.2"; Data = "28/04/2026"; Descricao = "Catalogo: corrige Teams corporativo, Outlook, News duplicado, Codecs separados e OneDrive Win32 explicito" },
+    [PSCustomObject]@{ Versao = "2.1.1"; Data = "28/04/2026"; Descricao = "UX: ESC sai no menu de categorias e volta ao menu anterior na escolha de itens" },
+    [PSCustomObject]@{ Versao = "2.1.0"; Data = "28/04/2026"; Descricao = "UX: menu em dois niveis permite escolher categorias, itens dentro da categoria, tudo da categoria ou todas as categorias" },
     [PSCustomObject]@{ Versao = "2.0.2"; Data = "28/04/2026"; Descricao = "Visual: alinha fluxo de remocao ao padrao do ia-install com resumo unico e categorias mais explicitas" },
     [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "UX: remove simbolos Unicode da interface e pergunta se deseja voltar ao menu apos concluir" },
     [PSCustomObject]@{ Versao = "2.0.1"; Data = "28/04/2026"; Descricao = "Fix: auto-elevacao preserva arrays como -Apps Xbox Cortana em vez de string unica" },
@@ -148,76 +166,88 @@ $script:AppsCatalog = [ordered]@{
         )
     }
     'Outlook' = [PSCustomObject]@{
-        Display = 'Outlook (versao Microsoft Store, nao corporativo)'
+        Display = 'Novo Outlook (Microsoft Store; pode ser usado em conta corporativa)'
         Apps = @('Microsoft.OutlookForWindows')
     }
     'OneDrive' = [PSCustomObject]@{
         Display = 'OneDrive (sync provider Appx + cliente Win32 OneDriveSetup)'
-        Apps = @('Microsoft.OneDriveSync')
-        Win32 = $true  # tambem desinstala OneDriveSetup.exe
-    }
-    'Padrao' = [PSCustomObject]@{
-        Display = 'Padrao MS (OneNote, Paint 3D, Skype, Phone, Feedback, Solitaire)'
         Apps = @(
-            'Microsoft.Office.OneNote',
-            'Microsoft.MSPaint',
-            'Microsoft.SkypeApp',
-            'Microsoft.YourPhone',
-            'Microsoft.MixedReality.Portal',
-            'Microsoft.WindowsFeedbackHub',
-            'Microsoft.MicrosoftSolitaireCollection',
-            'Microsoft.GetStarted'
+            'Microsoft.OneDriveSync',
+            'OneDriveSetup.exe'
         )
+        Win32 = $true
     }
-    'Cortana' = [PSCustomObject]@{
-        Display = 'Cortana (assistente virtual)'
-        Apps = @('Microsoft.549981C3F5F10')
-    }
-    'Midia' = [PSCustomObject]@{
-        Display = 'Midia (Fotos, Filmes, Mapas, Clima)'
-        Apps = @(
-            'Microsoft.ZuneVideo',
-            'Microsoft.Windows.Photos',
-            'Microsoft.WindowsMaps',
-            'Microsoft.BingWeather'
-        )
+    'Teams' = [PSCustomObject]@{
+        Display = 'Microsoft Teams Personal/Consumer (nao remove MSTeams corporativo)'
+        Apps = @('MicrosoftTeams')
     }
     'Copilot' = [PSCustomObject]@{
         Display = 'Copilot (Win11 24H2+ usa winget, anteriores usa Appx)'
         Apps = @('Microsoft.Copilot','Microsoft.Windows.Ai.Copilot.Provider')
         Winget = 'Microsoft.Copilot'
     }
+    'Cortana' = [PSCustomObject]@{
+        Display = 'Cortana (assistente virtual)'
+        Apps = @('Microsoft.549981C3F5F10')
+    }
     'Office' = [PSCustomObject]@{
-        Display = 'Email/Hub Office (Mail, Calendar, MicrosoftOfficeHub)'
+        Display = 'Office e Microsoft 365 (OneNote, Hub Office, Sway)'
         Apps = @(
-            'microsoft.windowscommunicationsapps',
+            'Microsoft.Office.OneNote',
             'Microsoft.MicrosoftOfficeHub',
             'Microsoft.Office.Sway'
         )
     }
-    'Outros' = [PSCustomObject]@{
-        Display = 'Outros (Ajuda, Camera, Alarmes, 3D Viewer, Voice Recorder)'
+    'Comunicacao' = [PSCustomObject]@{
+        Display = 'Comunicacao (Email/Calendario, Skype, Phone Link)'
         Apps = @(
-            'Microsoft.GetHelp',
+            'microsoft.windowscommunicationsapps',
+            'Microsoft.SkypeApp',
+            'Microsoft.YourPhone'
+        )
+    }
+    'Midia' = [PSCustomObject]@{
+        Display = 'Midia (Filmes, Fotos, Media Player, Camera, Gravador)'
+        Apps = @(
+            'Microsoft.ZuneVideo',
+            'Microsoft.Windows.Photos',
+            'Microsoft.ZuneMusic',
             'Microsoft.WindowsCamera',
+            'Microsoft.WindowsSoundRecorder'
+        )
+    }
+    'MapasClima' = [PSCustomObject]@{
+        Display = 'Mapas e Clima'
+        Apps = @(
+            'Microsoft.WindowsMaps',
+            'Microsoft.BingWeather'
+        )
+    }
+    'Utilitarios' = [PSCustomObject]@{
+        Display = 'Utilitarios opcionais (Paint, Alarmes, 3D Viewer, Sticky Notes, Mixed Reality)'
+        Apps = @(
+            'Microsoft.MSPaint',
             'Microsoft.WindowsAlarms',
             'Microsoft.Microsoft3DViewer',
-            'Microsoft.WindowsSoundRecorder',
-            'Microsoft.MicrosoftPowerBIForWindows',
-            'MicrosoftCorporationII.QuickAssist'
+            'Microsoft.MicrosoftStickyNotes',
+            'Microsoft.MixedReality.Portal'
         )
     }
-    'StickyNotes' = [PSCustomObject]@{
-        Display = 'Sticky Notes (Notas Autoadesivas)'
-        Apps = @('Microsoft.MicrosoftStickyNotes')
-    }
-    'Multimidia' = [PSCustomObject]@{
-        Display = 'Reprodutor multimidia (Zune Music, codecs Web/VP9)'
+    'FeedbackDicas' = [PSCustomObject]@{
+        Display = 'Feedback, Dicas e Ajuda'
         Apps = @(
-            'Microsoft.ZuneMusic',
-            'Microsoft.WebMediaExtensions',
-            'Microsoft.VP9VideoExtensions'
+            'Microsoft.WindowsFeedbackHub',
+            'Microsoft.GetStarted',
+            'Microsoft.GetHelp'
         )
+    }
+    'Suporte' = [PSCustomObject]@{
+        Display = 'Suporte remoto (Assistencia Rapida; use com cuidado)'
+        Apps = @('MicrosoftCorporationII.QuickAssist')
+    }
+    'Jogos' = [PSCustomObject]@{
+        Display = 'Jogos casuais'
+        Apps = @('Microsoft.MicrosoftSolitaireCollection')
     }
     'Consumer' = [PSCustomObject]@{
         Display = 'Apps consumer (Spotify, TikTok, Disney, Facebook, Instagram, LinkedIn)'
@@ -231,16 +261,7 @@ $script:AppsCatalog = [ordered]@{
             '7EE7776C.LinkedInforWindows',
             'Netflix.Netflix',
             'Amazon.com.Amazon',
-            'PandoraMediaInc.29680B314EFC2',
-            'Microsoft.News',
-            'Microsoft.BingNews'
-        )
-    }
-    'Teams' = [PSCustomObject]@{
-        Display = 'Microsoft Teams Personal/Consumer (NAO corporativo)'
-        Apps = @(
-            'MicrosoftTeams',
-            'MSTeams'
+            'PandoraMediaInc.29680B314EFC2'
         )
     }
     'Clipchamp' = [PSCustomObject]@{
@@ -258,14 +279,88 @@ $script:AppsCatalog = [ordered]@{
         )
     }
     'Family' = [PSCustomObject]@{
-        Display = 'Family + PowerAutomate (apps preinstalados desnecessarios)'
+        Display = 'Microsoft Family'
+        Apps = @('MicrosoftCorporationII.MicrosoftFamily')
+    }
+    'PowerAutomate' = [PSCustomObject]@{
+        Display = 'Power Automate Desktop (pode ser corporativo)'
+        Apps = @('Microsoft.PowerAutomateDesktop')
+    }
+    'PowerBI' = [PSCustomObject]@{
+        Display = 'Power BI Store App (pode ser corporativo)'
+        Apps = @('Microsoft.MicrosoftPowerBIForWindows')
+    }
+    'Codecs' = [PSCustomObject]@{
+        Display = 'Codecs/extensoes de midia (podem afetar reproducao de videos)'
         Apps = @(
-            'MicrosoftCorporationII.MicrosoftFamily',
-            'Microsoft.PowerAutomateDesktop'
+            'Microsoft.WebMediaExtensions',
+            'Microsoft.VP9VideoExtensions'
         )
     }
 }
 
+# ----------------------------------------------------------
+# ROTULOS AMIGAVEIS - usados apenas no menu/preview
+# Mantem o identificador tecnico visivel para auditoria e precisao.
+# ----------------------------------------------------------
+$script:AppDisplayNames = @{
+    'Microsoft.XboxGameOverlay' = 'Xbox Game Bar Overlay'
+    'Microsoft.Xbox.TCUI' = 'Xbox TCUI'
+    'Microsoft.XboxGamingOverlay' = 'Xbox Gaming Overlay'
+    'Microsoft.XboxIdentityProvider' = 'Xbox Identity Provider'
+    'Microsoft.XboxSpeechToTextOverlay' = 'Xbox Speech To Text Overlay'
+    'Microsoft.GamingApp' = 'Xbox / Gaming App'
+    'Microsoft.XboxApp' = 'Xbox Console Companion'
+    'Microsoft.OutlookForWindows' = 'Novo Outlook'
+    'Microsoft.OneDriveSync' = 'OneDrive Sync Appx'
+    'OneDriveSetup.exe' = 'OneDrive cliente Win32'
+    'Microsoft.Office.OneNote' = 'OneNote'
+    'Microsoft.MSPaint' = 'Paint'
+    'Microsoft.SkypeApp' = 'Skype'
+    'Microsoft.YourPhone' = 'Phone Link / Seu Telefone'
+    'Microsoft.MixedReality.Portal' = 'Mixed Reality Portal'
+    'Microsoft.WindowsFeedbackHub' = 'Feedback Hub'
+    'Microsoft.MicrosoftSolitaireCollection' = 'Microsoft Solitaire Collection'
+    'Microsoft.GetStarted' = 'Dicas / Get Started'
+    'Microsoft.549981C3F5F10' = 'Cortana'
+    'Microsoft.ZuneVideo' = 'Filmes e TV'
+    'Microsoft.Windows.Photos' = 'Fotos'
+    'Microsoft.WindowsMaps' = 'Mapas'
+    'Microsoft.BingWeather' = 'Clima'
+    'Microsoft.Copilot' = 'Microsoft Copilot'
+    'Microsoft.Windows.Ai.Copilot.Provider' = 'Windows Copilot Provider'
+    'microsoft.windowscommunicationsapps' = 'Email e Calendario'
+    'Microsoft.MicrosoftOfficeHub' = 'Microsoft 365 / Office Hub'
+    'Microsoft.Office.Sway' = 'Sway'
+    'Microsoft.GetHelp' = 'Obter Ajuda'
+    'Microsoft.WindowsCamera' = 'Camera'
+    'Microsoft.WindowsAlarms' = 'Alarmes e Relogio'
+    'Microsoft.Microsoft3DViewer' = 'Visualizador 3D'
+    'Microsoft.WindowsSoundRecorder' = 'Gravador de Voz'
+    'Microsoft.MicrosoftPowerBIForWindows' = 'Power BI Store App'
+    'MicrosoftCorporationII.QuickAssist' = 'Assistencia Rapida'
+    'Microsoft.MicrosoftStickyNotes' = 'Sticky Notes'
+    'Microsoft.ZuneMusic' = 'Media Player / Groove Music'
+    'Microsoft.WebMediaExtensions' = 'Web Media Extensions'
+    'Microsoft.VP9VideoExtensions' = 'VP9 Video Extensions'
+    'SpotifyAB.SpotifyMusic' = 'Spotify'
+    'BytedancePte.Ltd.TikTok' = 'TikTok'
+    'Disney.37853FC22B2CE' = 'Disney+'
+    'Facebook.Facebook' = 'Facebook'
+    'Facebook.Instagram' = 'Instagram'
+    'Microsoft.LinkedIn' = 'LinkedIn'
+    '7EE7776C.LinkedInforWindows' = 'LinkedIn for Windows'
+    'Netflix.Netflix' = 'Netflix'
+    'Amazon.com.Amazon' = 'Amazon'
+    'PandoraMediaInc.29680B314EFC2' = 'Pandora'
+    'MicrosoftTeams' = 'Microsoft Teams Personal/Consumer'
+    'Clipchamp.Clipchamp' = 'Clipchamp'
+    'Microsoft.Clipchamp' = 'Microsoft Clipchamp'
+    'Microsoft.BingNews' = 'Bing News'
+    'Microsoft.News' = 'Microsoft News'
+    'MicrosoftCorporationII.MicrosoftFamily' = 'Microsoft Family'
+    'Microsoft.PowerAutomateDesktop' = 'Power Automate Desktop'
+}
 # ----------------------------------------------------------
 # APPS PROTEGIDOS - jamais devem ser removidos (quebram o sistema)
 # Verificacao executada antes de cada remocao a menos que -SkipProtectedCheck
@@ -405,26 +500,31 @@ function Write-Info  { param($msg) Write-Host ("  {0} {1}" -f $script:SymInfo, $
 
 function Write-Banner {
     try { Clear-Host } catch { }
-    $hLine = ([string]$script:BoxH) * 61
-    $empty = ' ' * 61
     Write-Host ""
-    Write-Host ("  $($script:BoxTL)$hLine$($script:BoxTR)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxV)     R E M O V E - A P P S                                   $($script:BoxV)") -ForegroundColor White
-    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxV)     Limpeza de bloatware do Windows                         $($script:BoxV)") -ForegroundColor DarkCyan
-    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxV)     v{0,-6}                                                  $($script:BoxV)" -f $SCRIPT_VERSION) -ForegroundColor DarkGray
-    Write-Host ("  $($script:BoxV)$empty$($script:BoxV)") -ForegroundColor Cyan
-    Write-Host ("  $($script:BoxBL)$hLine$($script:BoxBR)") -ForegroundColor Cyan
+    Write-Host "  R E M O V E - A P P S" -ForegroundColor White
+    Write-Host ("  Limpeza de bloatware do Windows | v{0}" -f $SCRIPT_VERSION) -ForegroundColor DarkCyan
     Write-Host ""
 
-    # Info do sistema detectado
-    if ($script:Compat.OsCaption) {
-        Write-Host ("  Sistema: {0} (build {1})" -f $script:Compat.OsCaption, $script:Compat.BuildNumber) -ForegroundColor DarkGray
-    }
-    if ($script:Compat.IsHome) {
-        Write-Host "  $($script:SymWarn) Edicao Home detectada: bloqueio de reinstalacao via GPO sera limitado." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+function Write-MenuHeader {
+    param(
+        [string]$Subtitulo = 'Menu de categorias',
+        [switch]$ShowSystem
+    )
+
+    try { Clear-Host } catch { }
+    Write-Host ""
+    Write-Host "  R E M O V E - A P P S" -ForegroundColor White
+    Write-Host ("  {0} | v{1}" -f $Subtitulo, $SCRIPT_VERSION) -ForegroundColor DarkCyan
+    if ($ShowSystem) {
+        if ($script:Compat.OsCaption) {
+            Write-Host ("  Sistema: {0} (build {1})" -f $script:Compat.OsCaption, $script:Compat.BuildNumber) -ForegroundColor DarkGray
+        }
+        if ($script:Compat.IsHome) {
+            Write-Host "  $($script:SymWarn) Edicao Home detectada: bloqueio de reinstalacao via GPO sera limitado." -ForegroundColor Yellow
+        }
     }
     Write-Host ""
 }
@@ -627,6 +727,7 @@ function Request-Elevation {
             # wt.exe -w -1 forca nova janela (necessario quando elevado a partir de sessao nao-elevada)
             $wtArgs = @(
                 '-w','-1',
+                '--size','140,42',
                 'new-tab',
                 '--title','remove-apps',
                 '--suppressApplicationTitle',
@@ -648,6 +749,15 @@ function Request-Elevation {
 try {
   `$Host.UI.RawUI.BackgroundColor = 'Black'
   `$Host.UI.RawUI.ForegroundColor = 'White'
+  `$raw = `$Host.UI.RawUI
+  `$buffer = `$raw.BufferSize
+  if (`$buffer.Width -lt 140) { `$buffer.Width = 140 }
+  if (`$buffer.Height -lt 3000) { `$buffer.Height = 3000 }
+  `$raw.BufferSize = `$buffer
+  `$window = `$raw.WindowSize
+  if (`$window.Width -lt 140) { `$window.Width = 140 }
+  if (`$window.Height -lt 42) { `$window.Height = 42 }
+  `$raw.WindowSize = `$window
   Clear-Host
 } catch {}
 & '$cmdPath' $paramStr
@@ -945,44 +1055,93 @@ function Block-AppReinstall {
 # ----------------------------------------------------------
 # Menu interativo / nao-interativo
 # ----------------------------------------------------------
-function Get-CategoriasParaRemover {
-    if (-not $script:ForceMenu) {
-        if ($Tudo) { return $script:AppsCatalog.Keys }
-        if ($Apps) { return $Apps }
-    }
 
-    # Modo interativo
-    Write-Host "  Selecione as categorias a remover (numeros separados por virgula):" -ForegroundColor White
-    Write-Host ""
+function Get-AppMenuLabel {
+    param([Parameter(Mandatory)][string]$App)
 
-    $i = 1
-    $idx = @{}
-    foreach ($cat in $script:AppsCatalog.Keys) {
-        $info = $script:AppsCatalog[$cat]
-        Write-Host ("  [{0,2}] {1}" -f $i, $info.Display) -ForegroundColor Yellow
-        $idx[$i.ToString()] = $cat
-        $i++
+    if ($script:AppDisplayNames.ContainsKey($App)) {
+        return "{0} ({1})" -f $script:AppDisplayNames[$App], $App
     }
-    $totalIdx = $i - 1
-    Write-Host ""
-    Write-Host ("  [{0,2}] TUDO (todas as categorias acima)" -f ($totalIdx + 1)) -ForegroundColor Red
-    Write-Host  "  [ 0] Cancelar" -ForegroundColor Yellow
-    Write-Host ""
+    return $App
+}
+function New-RemovalPlanItem {
+    param(
+        [Parameter(Mandatory)][string]$Categoria,
+        [Parameter(Mandatory)][string[]]$Apps
+    )
+
+    [PSCustomObject]@{
+        Categoria = $Categoria
+        Apps      = @($Apps)
+    }
+}
+
+
+function Read-MenuLine {
+    param(
+        [string]$Prompt,
+        [string]$EscLabel = 'cancelar'
+    )
+
+    Write-Host ("{0} [ENTER = confirmar | ESC = {1}] " -f $Prompt, $EscLabel) -ForegroundColor White -NoNewline
+    $buffer = New-Object System.Text.StringBuilder
+
+    while ($true) {
+        $key = [Console]::ReadKey($true)
+
+        if ($key.Key -eq 'Enter') {
+            Write-Host ""
+            return $buffer.ToString()
+        }
+
+        if ($key.Key -eq 'Escape') {
+            Write-Host "ESC" -ForegroundColor Yellow
+            return $null
+        }
+
+        if ($key.Key -eq 'Backspace') {
+            if ($buffer.Length -gt 0) {
+                [void]$buffer.Remove($buffer.Length - 1, 1)
+                Write-Host "`b `b" -NoNewline
+            }
+            continue
+        }
+
+        if (-not [char]::IsControl($key.KeyChar)) {
+            [void]$buffer.Append($key.KeyChar)
+            Write-Host $key.KeyChar -NoNewline
+        }
+    }
+}
+function Select-MenuItems {
+    param(
+        [Parameter(Mandatory)][hashtable]$Index,
+        [Parameter(Mandatory)][int]$AllOption,
+        [string]$Prompt = "  Digite as opcoes",
+        [string]$EscLabel = "cancelar",
+        [switch]$AllowSkip
+    )
 
     do {
-        $input = Read-Host "  Digite as opcoes (ex: 1,3,5) ou 0 para cancelar"
-        if ($input -eq '0') { return @() }
+        $input = Read-MenuLine -Prompt $Prompt -EscLabel $EscLabel
+        if ($null -eq $input) {
+            return '__ESC__'
+        }
+        if ($input -eq '0') {
+            if ($AllowSkip) { return '__SKIP__' }
+            return $null
+        }
 
         $partes = $input -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
         $selecionadas = @()
         $invalidas = @()
 
         foreach ($p in $partes) {
-            if ($p -eq ($totalIdx + 1).ToString()) {
-                return $script:AppsCatalog.Keys
+            if ($p -eq $AllOption.ToString()) {
+                return '__ALL__'
             }
-            if ($idx.ContainsKey($p)) {
-                $selecionadas += $idx[$p]
+            if ($Index.ContainsKey($p)) {
+                $selecionadas += $Index[$p]
             } else {
                 $invalidas += $p
             }
@@ -994,10 +1153,128 @@ function Get-CategoriasParaRemover {
         }
 
         if ($selecionadas.Count -gt 0) {
-            return $selecionadas | Sort-Object -Unique
+            return @($selecionadas | Sort-Object -Unique)
         }
+
         Write-Fail "Nenhuma opcao valida selecionada."
     } while ($true)
+}
+
+function Get-AppsDaCategoriaInterativo {
+    param([Parameter(Mandatory)][string]$Categoria)
+
+    $info = $script:AppsCatalog[$Categoria]
+    Write-MenuHeader -Subtitulo 'Selecao de itens por categoria'
+    Write-Host ("  Categoria: {0}" -f $info.Display) -ForegroundColor White
+    Write-Host "  Escolha os itens desta categoria:" -ForegroundColor White
+    Write-Host ""
+
+    $idx = @{}
+    $i = 1
+    foreach ($app in $info.Apps) {
+        Write-Host ("  [{0,2}] {1}" -f $i, (Get-AppMenuLabel -App $app)) -ForegroundColor Yellow
+        $idx[$i.ToString()] = $app
+        $i++
+    }
+
+    $allOption = $i
+    Write-Host ""
+    Write-Host ("  [{0,2}] TUDO desta categoria" -f $allOption) -ForegroundColor Red
+    Write-Host ""
+
+    $result = Select-MenuItems -Index $idx -AllOption $allOption -Prompt "  Selecione itens (ex: 1,3)" -EscLabel "volta" -AllowSkip
+    if ($result -eq '__ESC__') {
+        return '__BACK__'
+    }
+    if ($result -eq '__SKIP__') {
+        return '__SKIP__'
+    }
+    if ($result -eq '__ALL__') {
+        return @($info.Apps)
+    }
+    return @($result)
+}
+
+function Get-RemovalPlan {
+    param([switch]$Redraw)
+
+    if (-not $script:ForceMenu) {
+        if ($Tudo) {
+            $plan = @()
+            foreach ($cat in $script:AppsCatalog.Keys) {
+                $plan += New-RemovalPlanItem -Categoria $cat -Apps $script:AppsCatalog[$cat].Apps
+            }
+            return $plan
+        }
+
+        if ($Apps) {
+            $plan = @()
+            foreach ($cat in $Apps) {
+                $plan += New-RemovalPlanItem -Categoria $cat -Apps $script:AppsCatalog[$cat].Apps
+            }
+            return $plan
+        }
+    }
+
+    Write-MenuHeader -Subtitulo 'Menu de categorias' -ShowSystem
+    if ($script:Compat.WindowsVer -eq 'Server') {
+        Write-Warn "Detectado Windows Server. Alguns apps consumer nem existem nesta edicao."
+    }
+
+    # Modo interativo: primeiro categorias, depois itens por categoria.
+    Write-Host "  Selecione as categorias a avaliar (numeros separados por virgula):" -ForegroundColor White
+    Write-Host ""
+
+    $idx = @{}
+    $i = 1
+    foreach ($cat in $script:AppsCatalog.Keys) {
+        $info = $script:AppsCatalog[$cat]
+        Write-Host ("  [{0,2}] {1}" -f $i, $info.Display) -ForegroundColor Yellow
+        $idx[$i.ToString()] = $cat
+        $i++
+    }
+
+    $allOption = $i
+    Write-Host ""
+    Write-Host ("  [{0,2}] TODAS AS CATEGORIAS (remove tudo)" -f $allOption) -ForegroundColor Red
+    Write-Host ""
+
+    $categorias = Select-MenuItems -Index $idx -AllOption $allOption -Prompt "  Selecione categorias (ex: 1,3,5)" -EscLabel "sair"
+    if ($categorias -eq '__ESC__') { return @() }
+    if (-not $categorias) { return @() }
+
+    $plan = @()
+    $skippedAny = $false
+    if ($categorias -eq '__ALL__') {
+        foreach ($cat in $script:AppsCatalog.Keys) {
+            $plan += New-RemovalPlanItem -Categoria $cat -Apps $script:AppsCatalog[$cat].Apps
+        }
+        return $plan
+    }
+
+    foreach ($cat in $categorias) {
+        $selectedApps = @(Get-AppsDaCategoriaInterativo -Categoria $cat)
+        if ($selectedApps.Count -eq 1 -and $selectedApps[0] -eq '__BACK__') {
+            Write-Info "Voltando ao menu de categorias."
+            return Get-RemovalPlan -Redraw
+        }
+        if ($selectedApps.Count -eq 1 -and $selectedApps[0] -eq '__SKIP__') {
+            $skippedAny = $true
+            Write-Info "Categoria pulada: $cat"
+            continue
+        }
+        if ($selectedApps.Count -gt 0) {
+            $plan += New-RemovalPlanItem -Categoria $cat -Apps $selectedApps
+        } else {
+            Write-Info "Categoria pulada: $cat"
+        }
+    }
+
+    if ($plan.Count -eq 0 -and $skippedAny) {
+        Write-Info "Todas as categorias selecionadas foram puladas. Voltando ao menu de categorias."
+        return Get-RemovalPlan -Redraw
+    }
+    return $plan
 }
 
 # ============================================================
@@ -1008,24 +1285,34 @@ try {
 while ($true) {
     $script:RemoveResults = @()
     $script:ScriptStartTime = Get-Date
-    Write-Banner
+    if ($Tudo -or $Apps) {
+        Write-Banner
 
-    if ($script:Compat.WindowsVer -eq 'Server') {
-        Write-Warn "Detectado Windows Server. Alguns apps consumer nem existem nesta edicao."
+        if ($script:Compat.WindowsVer -eq 'Server') {
+            Write-Warn "Detectado Windows Server. Alguns apps consumer nem existem nesta edicao."
+        }
     }
 
-    # Resolve categorias
-    $categorias = Get-CategoriasParaRemover
-    if (-not $categorias -or $categorias.Count -eq 0) {
-        Write-Warn "Nenhuma categoria selecionada. Encerrando."
+    # Resolve plano de remocao
+    $removalPlan = @(Get-RemovalPlan)
+    if (-not $removalPlan -or $removalPlan.Count -eq 0) {
+        Write-Warn "Nenhum item selecionado. Encerrando."
         break
     }
 
     # Mostra plano
     Write-Host ""
-    Write-Host "  Categorias selecionadas:" -ForegroundColor White
-    foreach ($c in $categorias) {
-        Write-Host ("    - {0}: {1}" -f $c, $script:AppsCatalog[$c].Display) -ForegroundColor Cyan
+    Write-Host "  Plano de remocao:" -ForegroundColor White
+    foreach ($item in $removalPlan) {
+        $info = $script:AppsCatalog[$item.Categoria]
+        $allSelected = (@($item.Apps).Count -eq @($info.Apps).Count)
+        $label = if ($allSelected) { "TUDO da categoria" } else { "$(@($item.Apps).Count) item(ns)" }
+        Write-Host ("    - {0}: {1} [{2}]" -f $item.Categoria, $info.Display, $label) -ForegroundColor Cyan
+        if (-not $allSelected) {
+            foreach ($app in $item.Apps) {
+                Write-Host ("        - {0}" -f (Get-AppMenuLabel -App $app)) -ForegroundColor DarkCyan
+            }
+        }
     }
     Write-Host ""
 
@@ -1050,21 +1337,26 @@ while ($true) {
     }
     Write-Ok "Provisioned: $($provisionedList.Count) pacotes  |  Installed: $($installedList.Count) pacotes"
 
-    # Itera categorias
-    foreach ($cat in $categorias) {
+    # Itera plano de remocao
+    foreach ($item in $removalPlan) {
+        $cat = $item.Categoria
         $info = $script:AppsCatalog[$cat]
         Write-Phase "$cat - $($info.Display)"
 
-        foreach ($app in $info.Apps) {
-            $wingetId = if ($info.PSObject.Properties['Winget']) { $info.Winget } else { '' }
+        foreach ($app in $item.Apps) {
+            if ($cat -eq 'OneDrive' -and $app -eq 'OneDriveSetup.exe') {
+                continue
+            }
+
+            $wingetId = if ($info.PSObject.Properties['Winget'] -and ($info.Apps -contains $app)) { $info.Winget } else { '' }
             Invoke-AppPackageRemoval -Categoria $cat -App $app `
                 -ProvisionedList $provisionedList `
                 -InstalledList $installedList `
                 -WingetId $wingetId
         }
 
-        # Tratamento especial: OneDrive Win32
-        if ($cat -eq 'OneDrive' -and $info.PSObject.Properties['Win32'] -and $info.Win32) {
+        # Tratamento especial: OneDrive Win32 somente quando o item Win32 foi selecionado.
+        if ($cat -eq 'OneDrive' -and ($item.Apps -contains 'OneDriveSetup.exe') -and $info.PSObject.Properties['Win32'] -and $info.Win32) {
             Uninstall-OneDriveWin32 -Categoria $cat
         }
     }
@@ -1101,3 +1393,13 @@ while ($true) {
         try { Stop-Transcript | Out-Null } catch { }
     }
 }
+
+
+
+
+
+
+
+
+
+
