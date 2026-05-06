@@ -48,7 +48,7 @@
     Instala somente Claude Code e Codex CLI sem prompts.
 
 .NOTES
-    Versao: 2.10.5
+    Versao: 2.10.8
     Compatibilidade: Windows 10/11, Server 2016+, PowerShell 5.1+
 #>
 [CmdletBinding(DefaultParameterSetName='Interactive', SupportsShouldProcess=$true)]
@@ -103,9 +103,12 @@ if ($LogPath -or ($Silent -and -not $LogPath)) {
 # ----------------------------------------------------------
 # Versao e Historico de Atualizacoes
 # ----------------------------------------------------------
-$SCRIPT_VERSION = "2.10.5"
+$SCRIPT_VERSION = "2.10.8"
 $SCRIPT_DATA    = "06/05/2026"
 $CHANGELOG = @(
+    [PSCustomObject]@{ Versao = "2.10.8"; Data = "06/05/2026"; Descricao = "Entrada: limpa buffer antes de confirmacoes" }
+    [PSCustomObject]@{ Versao = "2.10.7"; Data = "06/05/2026"; Descricao = "Diagnostico: evita travamento no npm prefix e lista vazia" }
+    [PSCustomObject]@{ Versao = "2.10.6"; Data = "06/05/2026"; Descricao = "VC++: baixa a versao mais recente e atualiza se a instalada estiver antiga" }
     [PSCustomObject]@{ Versao = "2.10.5"; Data = "06/05/2026"; Descricao = "VC++: corrige deteccao em registros sem DisplayName" },
     [PSCustomObject]@{ Versao = "2.10.0"; Data = "06/05/2026"; Descricao = "Codex: verifica e instala Visual C++ Redistributable x64 quando necessario" },
     [PSCustomObject]@{ Versao = "2.9.9"; Data = "29/04/2026"; Descricao = "UX: cabecalho compacto sem recuo no banner" },
@@ -199,7 +202,7 @@ $CHANGELOG = @(
 # ----------------------------------------------------------
 # Dependencias externas
 # ----------------------------------------------------------
-$script:VC_REDIST_X64_URL = 'https://aka.ms/vc14/vc_redist.x64.exe'
+$script:VC_REDIST_X64_URL = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
 
 # ----------------------------------------------------------
 # CATALOGO DE PACOTES - metadados centralizados
@@ -556,6 +559,34 @@ function Show-Spinner {
     return $result
 }
 
+function Invoke-NpmPrefixSafe {
+    param([int]$TimeoutSec = 4)
+
+    try {
+        $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+        if (-not $npmCmd) { return "" }
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $npmCmd.Source
+        $psi.Arguments = 'config get prefix'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+            try { $proc.Kill() } catch { }
+            return ""
+        }
+
+        if ($proc.ExitCode -ne 0) { return "" }
+        $out = $proc.StandardOutput.ReadToEnd()
+        return (($out -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1).Trim()
+    } catch { }
+
+    return ""
+}
 function Get-CliToolInfo {
     param(
         [Parameter(Mandatory=$true)][string]$Cmd,
@@ -569,9 +600,7 @@ function Get-CliToolInfo {
         $cmdInfo = Get-Command $Cmd -ErrorAction SilentlyContinue
         if ($cmdInfo -and $cmdInfo.Source) { [void]$candidates.Add($cmdInfo.Source) }
     } catch { }
-
-    $npmPrefix = ""
-    try { $npmPrefix = (& npm config get prefix 2>$null | Select-Object -First 1).Trim() } catch { }
+    $npmPrefix = Invoke-NpmPrefixSafe
 
     $baseDirs = @(
         "$($u.AppData)\npm",
@@ -798,23 +827,45 @@ function Get-VcRedistX64 {
 }
 
 
+function Convert-ToVersionSafe {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $match = [regex]::Match($Value, '\d+(\.\d+){1,3}')
+    if (-not $match.Success) { return $null }
+
+    try { return [version]$match.Value } catch { return $null }
+}
+
+function Get-FileVersionSafe {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    try {
+        $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+        foreach ($candidate in @($info.ProductVersion, $info.FileVersion)) {
+            $version = Convert-ToVersionSafe -Value $candidate
+            if ($version) { return $version }
+        }
+    } catch { }
+    return $null
+}
+
 function Ensure-VcRedistX64 {
     Write-Phase "Visual C++ Redistributable x64"
-    Write-Step "Verificando pre-requisito do Codex..."
+    Write-Step "Verificando pre-requisito do Codex CLI/Desktop..."
 
     $installed = Get-VcRedistX64
+    $installedVersion = $null
     if ($installed) {
+        $installedVersion = Convert-ToVersionSafe -Value $installed.DisplayVersion
         $versionText = if ($installed.DisplayVersion) { " $($installed.DisplayVersion)" } else { "" }
-        Write-Ok "Visual C++ Redistributable x64 ja esta instalado$versionText."
-        Add-InstallResult -Nome "VC++ Redistributable x64" -Status "OK" -Versao $installed.DisplayVersion -Obs "pre-requisito Codex"
-        Pause-Readable 2
-        return $true
+        Write-Ok "Visual C++ Redistributable x64 encontrado$versionText."
+    } else {
+        Write-Warn "Visual C++ Redistributable x64 nao encontrado. O Codex pode precisar dele para funcionar."
     }
 
-    Write-Warn "Visual C++ Redistributable x64 nao encontrado. O Codex pode precisar dele para funcionar."
-
     if (-not (Test-IsAdmin)) {
-        Write-Warn "A instalacao pode solicitar elevacao UAC."
+        Write-Warn "A instalacao/atualizacao pode solicitar elevacao UAC."
     }
 
     $tempDir = Join-Path $env:TEMP "ia-install"
@@ -825,10 +876,28 @@ function Ensure-VcRedistX64 {
             New-Item -ItemType Directory -Path $tempDir -Force -ErrorAction Stop | Out-Null
         }
 
-        Write-Step "Baixando Visual C++ Redistributable x64..."
+        Write-Step "Baixando Visual C++ Redistributable x64 mais recente..."
         $null = Invoke-FastDownload -Url $script:VC_REDIST_X64_URL -OutFile $installer -Label "VC++ Redistributable x64"
 
-        Write-Step "Instalando Visual C++ Redistributable x64..."
+        $latestVersion = Get-FileVersionSafe -Path $installer
+        if ($latestVersion) {
+            Write-Ok "Versao disponivel : $latestVersion"
+        } else {
+            Write-Warn "Nao foi possivel ler a versao do instalador baixado. Prosseguindo em modo de reparo/verificacao."
+        }
+
+        if ($installed -and $installedVersion -and $latestVersion -and $installedVersion -ge $latestVersion) {
+            Write-Ok "Visual C++ Redistributable x64 ja esta atualizado."
+            Add-InstallResult -Nome "VC++ Redistributable x64" -Status "OK" -Versao $installed.DisplayVersion -Obs "pre-requisito Codex"
+            Pause-Readable 2
+            return $true
+        }
+
+        if ($installed -and $installedVersion -and $latestVersion) {
+            Write-Warn "Atualizacao disponivel: $installedVersion -> $latestVersion"
+        }
+
+        Write-Step "Instalando/atualizando Visual C++ Redistributable x64..."
         $proc = Start-Process -FilePath $installer -ArgumentList @('/install','/quiet','/norestart') -Wait -PassThru -ErrorAction Stop
         $okExitCodes = @(0, 3010, 1638)
 
@@ -837,6 +906,7 @@ function Ensure-VcRedistX64 {
             $versionAfter = if ($after) { $after.DisplayVersion } else { "" }
             Write-Ok "Visual C++ Redistributable x64 instalado/verificado."
             if ($proc.ExitCode -eq 3010) { Write-Warn "Reinicio recomendado pelo instalador do VC++." }
+            if ($proc.ExitCode -eq 1638) { Write-Ok "Uma versao igual ou mais nova ja estava instalada." }
             Add-InstallResult -Nome "VC++ Redistributable x64" -Status "OK" -Versao $versionAfter -Obs "pre-requisito Codex"
             Pause-Readable 2
             return $true
@@ -859,6 +929,7 @@ function Ensure-VcRedistX64 {
         } catch { }
     }
 }
+
 function Get-DesktopToolInfo {
     param(
         [string]$DisplayName,
@@ -1301,6 +1372,13 @@ Set-Alias -Name Pause-Readable -Value Wait-Readable -Scope Script -ErrorAction S
 .OUTPUTS
     [bool] $true para confirmar, $false para cancelar.
 #>
+function Clear-KeyBuffer {
+    try {
+        while ([Console]::KeyAvailable) {
+            [void][Console]::ReadKey($true)
+        }
+    } catch { }
+}
 function Confirm-Tecla {
     [CmdletBinding()]
     param([string]$Mensagem)
@@ -1310,6 +1388,9 @@ function Confirm-Tecla {
         Write-Verbose "[NonInteractive] Auto-confirmando: $Mensagem"
         return $true
     }
+
+    Clear-KeyBuffer
+
 
     Write-Host "  $Mensagem [ENTER = sim | ESC = nao] " -ForegroundColor White -NoNewline
     while ($true) {
@@ -2340,6 +2421,19 @@ function Invoke-Diagnostico {
         ClaudeDesk = $false
         CodexDesk  = $false
         OpenDesk   = $false
+    }
+
+    if ($diagItens.Count -eq 0) {
+        Write-Warn "Nenhuma ferramenta foi avaliada no diagnostico. Prosseguindo com a selecao original."
+        $resultado.Prosseguir = $true
+        $resultado.Git        = $CheckGit
+        $resultado.ClaudeCLI  = $CheckClaudeCLI
+        $resultado.CodexCLI   = $CheckCodexCLI
+        $resultado.OpenCode   = $CheckOpenCode
+        $resultado.ClaudeDesk = $CheckClaudeDesk
+        $resultado.CodexDesk  = $CheckCodexDesk
+        $resultado.OpenDesk   = $CheckOpenDesk
+        return $resultado
     }
 
     if ($acoesPendentes.Count -eq 0) {
@@ -3827,6 +3921,9 @@ if (-not (Confirm-Tecla "Voltar ao menu?")) {
         try { Stop-Transcript | Out-Null } catch { }
     }
 }
+
+
+
 
 
 
